@@ -7,11 +7,12 @@ import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, R
 import { TrendingUp, TrendingDown, DollarSign, ShoppingCart, AlertTriangle, Target, ArrowUpRight, ArrowDownRight } from 'lucide-react';
 import { toast } from 'sonner';
 
-const MetricCard = ({ title, value, change, icon: Icon, trend, format = 'number' }) => {
+const MetricCard = ({ title, value = 0, change, icon: Icon, trend, format = 'number' }) => {
   const isPositive = trend === 'up';
-  const formattedValue = format === 'currency' ? `$${value.toLocaleString()}` : 
-                        format === 'percent' ? `${value}%` : 
-                        value.toLocaleString();
+  const safeValue = value || 0;
+  const formattedValue = format === 'currency' ? `$${safeValue.toLocaleString()}` : 
+                        format === 'percent' ? `${safeValue}%` : 
+                        safeValue.toLocaleString();
 
   return (
     <Card className="bg-white border border-slate-200 shadow-sm rounded-sm hover:border-indigo-300 transition-colors duration-200" data-testid={`metric-card-${title.toLowerCase().replace(' ', '-')}`}>
@@ -111,7 +112,7 @@ const Dashboard = () => {
       </div>
 
       {/* Secondary Metrics */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
         <Card className="bg-white border border-slate-200 shadow-sm rounded-sm" data-testid="roas-card">
           <CardContent className="p-5">
             <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">ROAS</p>
@@ -124,6 +125,13 @@ const Dashboard = () => {
             <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">ACOS</p>
             <p className="text-3xl font-bold text-indigo-600 font-mono tracking-tight">{data?.acos || 0}%</p>
             <p className="text-xs text-slate-500 mt-1">Advertising Cost of Sales</p>
+          </CardContent>
+        </Card>
+        <Card className="bg-white border border-slate-200 shadow-sm rounded-sm" data-testid="tcos-card">
+          <CardContent className="p-5">
+            <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">TCOS</p>
+            <p className="text-3xl font-bold text-rose-600 font-mono tracking-tight">{data?.tcos || 0}%</p>
+            <p className="text-xs text-slate-500 mt-1">Total Cost of Sales</p>
           </CardContent>
         </Card>
         <Card className="bg-white border border-slate-200 shadow-sm rounded-sm" data-testid="alerts-card">
@@ -216,15 +224,15 @@ const Dashboard = () => {
               <tbody>
                 {data?.top_products?.map((product, idx) => (
                   <tr key={idx} className="hover:bg-slate-50/50 transition-colors border-b border-slate-100 last:border-0">
-                    <td className="py-3 px-4 text-sm text-slate-700 font-medium">{product.name}</td>
-                    <td className="py-3 px-4 text-sm text-slate-700 text-right font-mono">${product.revenue.toLocaleString()}</td>
-                    <td className="py-3 px-4 text-sm text-slate-700 text-right font-mono">{product.orders}</td>
-                    <td className="py-3 px-4 text-sm text-emerald-600 text-right font-mono">${product.profit.toLocaleString()}</td>
+                    <td className="py-3 px-4 text-sm text-slate-700 font-medium">{product.name || 'N/A'}</td>
+                    <td className="py-3 px-4 text-sm text-slate-700 text-right font-mono">${(product.revenue || 0).toLocaleString()}</td>
+                    <td className="py-3 px-4 text-sm text-slate-700 text-right font-mono">{product.orders || 0}</td>
+                    <td className="py-3 px-4 text-sm text-emerald-600 text-right font-mono">${(product.net_profit || 0).toLocaleString()}</td>
                     <td className="py-3 px-4 text-right">
                       <Badge className={`${
-                        product.stock_level < 50 ? 'bg-amber-50 text-amber-600 border-amber-200' : 'bg-emerald-50 text-emerald-600 border-emerald-200'
+                        (product.stock_level || 0) < 50 ? 'bg-amber-50 text-amber-600 border-amber-200' : 'bg-emerald-50 text-emerald-600 border-emerald-200'
                       } rounded-sm font-mono text-xs`}>
-                        {product.stock_level}
+                        {product.stock_level || 0}
                       </Badge>
                     </td>
                   </tr>
