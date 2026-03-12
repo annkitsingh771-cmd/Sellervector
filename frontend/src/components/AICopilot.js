@@ -38,7 +38,7 @@ const AICopilot = ({ isOpen, onClose }) => {
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-y-0 right-0 w-96 bg-white border-l border-slate-200 shadow-xl flex flex-col z-50 slide-in-right">
+    <div className="fixed inset-y-0 right-0 w-96 bg-white border-l border-slate-200 shadow-xl flex flex-col slide-in-right" style={{ zIndex: 9999 }}>
       {/* Header */}
       <div className="bg-indigo-700 text-white p-5 flex items-center justify-between">
         <div className="flex items-center gap-3">
