@@ -12,6 +12,8 @@ import Products from '@/pages/Products';
 import Competitors from '@/pages/Competitors';
 import Reports from '@/pages/Reports';
 import Settings from '@/pages/Settings';
+import FBAShipmentPlanner from '@/pages/FBAShipmentPlanner';
+import Subscription from '@/pages/Subscription';
 import Layout from '@/components/Layout';
 import '@/App.css';
 
@@ -61,6 +63,8 @@ function App() {
             <Route path="products" element={<Products />} />
             <Route path="competitors" element={<Competitors />} />
             <Route path="reports" element={<Reports />} />
+            <Route path="fba-shipments" element={<FBAShipmentPlanner />} />
+            <Route path="subscription" element={<Subscription />} />
             <Route path="settings" element={<Settings />} />
           </Route>
         </Routes>

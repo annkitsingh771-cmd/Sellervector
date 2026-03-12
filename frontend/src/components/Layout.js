@@ -18,8 +18,10 @@ const Layout = ({ user, onLogout }) => {
     { path: '/profit', icon: DollarSign, label: 'Profit Calculator' },
     { path: '/inventory', icon: Package, label: 'Inventory' },
     { path: '/products', icon: Box, label: 'Products' },
+    { path: '/fba-shipments', icon: Package, label: 'FBA Shipments' },
     { path: '/competitors', icon: Users, label: 'Competitors' },
     { path: '/reports', icon: FileText, label: 'Reports' },
+    { path: '/subscription', icon: Target, label: 'Subscription' },
     { path: '/settings', icon: Settings, label: 'Settings' },
   ];
 
