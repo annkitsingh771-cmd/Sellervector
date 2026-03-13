@@ -53,7 +53,7 @@ const Login = ({ onLogin }) => {
           <div className="inline-flex items-center gap-3 mb-3">
             <img src="/sellervector-logo.svg" alt="SellerVector" className="h-12 w-auto" />
           </div>
-          <p className="text-slate-600">The Operating System for Modern E-commerce Empires</p>
+          <p className="text-slate-600 font-semibold">Optimise Scale Dominate</p>
         </div>
 
         <Card className="bg-white border border-slate-200 shadow-sm rounded-sm">

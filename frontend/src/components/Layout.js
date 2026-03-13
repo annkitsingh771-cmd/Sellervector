@@ -40,7 +40,7 @@ const Layout = ({ user, onLogout }) => {
             <div className="flex items-center gap-3">
               <img src="/sellervector-logo.svg" alt="SellerVector" className="h-8 w-auto" />
             </div>
-            <p className="text-slate-400 text-xs mt-1">E-commerce Command Center</p>
+            <p className="text-slate-400 text-xs mt-1">Optimise Scale Dominate</p>
           </div>
 
           {/* Navigation */}
