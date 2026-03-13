@@ -23,6 +23,6 @@
   <line x1="192" y1="105" x2="530" y2="105" stroke="rgba(0,0,0,0.15)" stroke-width="1.2" fill="none"/>
 
   <!-- Tagline -->
-  <text x="192" y="134" font-family="Arial, sans-serif" font-weight="400" font-size="13" fill="#38BDF8" letter-spacing="4">OPTIMISE · SCALE · DOMINATE</text>
+  <text x="192" y="134" font-family="Arial, sans-serif" font-weight="700" font-size="13" fill="#000000" letter-spacing="4">OPTIMISE · SCALE · DOMINATE</text>
 
 </svg>

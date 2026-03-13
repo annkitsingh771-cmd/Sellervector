@@ -59,7 +59,6 @@ const Login = ({ onLogin }) => {
             />
           </div>
           <h1 className="text-2xl font-bold text-slate-900 mb-2 tracking-tight">Welcome to SellerVector</h1>
-          <p className="text-black text-base font-bold tracking-[0.15em] uppercase">Optimise Scale Dominate</p>
         </div>
 
         <Card className="bg-white border border-slate-200 shadow-sm rounded-sm">
