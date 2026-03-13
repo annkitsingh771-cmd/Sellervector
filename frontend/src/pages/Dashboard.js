@@ -8,10 +8,10 @@ import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, R
 import { TrendingUp, TrendingDown, DollarSign, ShoppingCart, AlertTriangle, Target, ArrowUpRight, ArrowDownRight, Calendar } from 'lucide-react';
 import { toast } from 'sonner';
 
-const MetricCard = ({ title, value = 0, change, icon: Icon, trend, format = 'number' }) => {
+const MetricCard = ({ title, value = 0, change, icon: Icon, trend, format = 'number', currencySymbol = '$' }) => {
   const isPositive = trend === 'up';
   const safeValue = value || 0;
-  const formattedValue = format === 'currency' ? `$${safeValue.toLocaleString()}` : 
+  const formattedValue = format === 'currency' ? `${currencySymbol}${safeValue.toLocaleString()}` : 
                         format === 'percent' ? `${safeValue}%` : 
                         safeValue.toLocaleString();
 
@@ -50,16 +50,18 @@ const Dashboard = () => {
   const [loading, setLoading] = useState(true);
   const [dateRange, setDateRange] = useState('30');
   const [marketplace, setMarketplace] = useState('all');
+  const [currency, setCurrency] = useState('INR'); // Default to INR for Indian sellers
 
   useEffect(() => {
     fetchDashboard();
-  }, [dateRange, marketplace]);
+  }, [dateRange, marketplace, currency]);
 
   const fetchDashboard = async () => {
     try {
       const params = new URLSearchParams();
       if (marketplace !== 'all') params.append('marketplace', marketplace);
       params.append('days', dateRange);
+      params.append('currency', currency);
       
       const response = await apiClient.get(`/dashboard?${params}`);
       setData(response.data);
@@ -81,6 +83,8 @@ const Dashboard = () => {
     );
   }
 
+  const currencySymbol = currency === 'INR' ? '₹' : '$';
+  
   return (
     <div className="space-y-6 fade-in">
       {/* Filters */}
@@ -107,6 +111,16 @@ const Dashboard = () => {
             <SelectItem value="Flipkart">Flipkart</SelectItem>
           </SelectContent>
         </Select>
+
+        <Select value={currency} onValueChange={setCurrency}>
+          <SelectTrigger className="w-32" data-testid="currency-filter">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="INR">₹ INR</SelectItem>
+            <SelectItem value="USD">$ USD</SelectItem>
+          </SelectContent>
+        </Select>
       </div>
 
       {/* Metrics Grid */}
@@ -118,6 +132,7 @@ const Dashboard = () => {
           icon={DollarSign}
           trend="up"
           format="currency"
+          currencySymbol={currencySymbol}
         />
         <MetricCard
           title="Total Orders"
@@ -125,6 +140,7 @@ const Dashboard = () => {
           change="+8.2%"
           icon={ShoppingCart}
           trend="up"
+          currencySymbol={currencySymbol}
         />
         <MetricCard
           title="Net Profit"
@@ -133,6 +149,7 @@ const Dashboard = () => {
           icon={TrendingUp}
           trend="up"
           format="currency"
+          currencySymbol={currencySymbol}
         />
         <MetricCard
           title="Ad Spend"
@@ -141,6 +158,7 @@ const Dashboard = () => {
           icon={Target}
           trend="down"
           format="currency"
+          currencySymbol={currencySymbol}
         />
       </div>
 
@@ -258,9 +276,9 @@ const Dashboard = () => {
                 {data?.top_products?.map((product, idx) => (
                   <tr key={idx} className="hover:bg-slate-50/50 transition-colors border-b border-slate-100 last:border-0">
                     <td className="py-3 px-4 text-sm text-slate-700 font-medium">{product.name || 'N/A'}</td>
-                    <td className="py-3 px-4 text-sm text-slate-700 text-right font-mono">${(product.revenue || 0).toLocaleString()}</td>
+                    <td className="py-3 px-4 text-sm text-slate-700 text-right font-mono">{currencySymbol}{(product.revenue || 0).toLocaleString()}</td>
                     <td className="py-3 px-4 text-sm text-slate-700 text-right font-mono">{product.orders || 0}</td>
-                    <td className="py-3 px-4 text-sm text-emerald-600 text-right font-mono">${(product.net_profit || 0).toLocaleString()}</td>
+                    <td className="py-3 px-4 text-sm text-emerald-600 text-right font-mono">{currencySymbol}{(product.net_profit || 0).toLocaleString()}</td>
                     <td className="py-3 px-4 text-right">
                       <Badge className={`${
                         (product.stock_level || 0) < 50 ? 'bg-amber-50 text-amber-600 border-amber-200' : 'bg-emerald-50 text-emerald-600 border-emerald-200'

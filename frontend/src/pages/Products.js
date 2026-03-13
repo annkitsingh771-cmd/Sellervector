@@ -24,8 +24,8 @@ const Products = () => {
     }
   };
 
-  const totalRevenue = products.reduce((sum, p) => sum + p.revenue, 0);
-  const totalProfit = products.reduce((sum, p) => sum + p.profit, 0);
+  const totalRevenue = products.reduce((sum, p) => sum + (p.revenue || 0), 0);
+  const totalProfit = products.reduce((sum, p) => sum + (p.net_profit || 0), 0);
 
   if (loading) {
     return <div className="flex items-center justify-center h-full"><p>Loading...</p></div>;
@@ -104,19 +104,19 @@ const Products = () => {
                   <tr key={product.id} className="hover:bg-slate-50/50 transition-colors border-b border-slate-100 last:border-0">
                     <td className="py-3 px-4 text-sm text-slate-700 font-medium">{product.name}</td>
                     <td className="py-3 px-4 text-sm text-slate-700 font-mono">{product.sku}</td>
-                    <td className="py-3 px-4 text-sm text-slate-700 text-right font-mono">${product.price.toFixed(2)}</td>
+                    <td className="py-3 px-4 text-sm text-slate-700 text-right font-mono">${(product.price || 0).toFixed(2)}</td>
                     <td className="py-3 px-4 text-right">
                       <Badge className={`${
-                        product.stock_level < 50 ? 'bg-amber-50 text-amber-600 border-amber-200' : 'bg-emerald-50 text-emerald-600 border-emerald-200'
+                        (product.stock_level || 0) < 50 ? 'bg-amber-50 text-amber-600 border-amber-200' : 'bg-emerald-50 text-emerald-600 border-emerald-200'
                       } rounded-sm font-mono text-xs`}>
-                        {product.stock_level}
+                        {product.stock_level || 0}
                       </Badge>
                     </td>
-                    <td className="py-3 px-4 text-sm text-slate-700 text-right font-mono">${product.revenue.toFixed(2)}</td>
-                    <td className="py-3 px-4 text-sm text-slate-700 text-right font-mono">{product.orders}</td>
-                    <td className="py-3 px-4 text-sm text-slate-700 text-right font-mono">{product.conversion_rate.toFixed(2)}%</td>
-                    <td className="py-3 px-4 text-sm text-rose-600 text-right font-mono">${product.ad_spend.toFixed(2)}</td>
-                    <td className="py-3 px-4 text-sm text-emerald-600 text-right font-mono font-bold">${product.profit.toFixed(2)}</td>
+                    <td className="py-3 px-4 text-sm text-slate-700 text-right font-mono">${(product.revenue || 0).toFixed(2)}</td>
+                    <td className="py-3 px-4 text-sm text-slate-700 text-right font-mono">{product.orders || 0}</td>
+                    <td className="py-3 px-4 text-sm text-slate-700 text-right font-mono">{(product.conversion_rate || 0).toFixed(2)}%</td>
+                    <td className="py-3 px-4 text-sm text-rose-600 text-right font-mono">${(product.ad_spend || 0).toFixed(2)}</td>
+                    <td className="py-3 px-4 text-sm text-emerald-600 text-right font-mono font-bold">${(product.net_profit || 0).toFixed(2)}</td>
                   </tr>
                 ))}
               </tbody>

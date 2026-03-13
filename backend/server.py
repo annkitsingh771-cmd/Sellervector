@@ -162,12 +162,14 @@ def calculate_product_metrics(revenue: float, orders: int, product_cost: float, 
     fba_fee = orders * 3.50
     storage_fee = random.uniform(5, 20)
     returns = revenue * 0.01
-    gst = revenue * 0.05  # Reduced from 18% to make more realistic
+    gst = revenue * 0.05
     other_charges = random.uniform(2, 10)
     
     total_costs = product_cost + referral_fee + fba_fee + ad_spend + storage_fee + returns + gst + other_charges
     net_profit = revenue - total_costs
-    tcos = (total_costs / revenue * 100) if revenue > 0 else 0
+    
+    # TCOS = (Ad Spend / Revenue) * 100  (User's formula)
+    tcos = (ad_spend / revenue * 100) if revenue > 0 else 0
     
     return {
         "referral_fee": round(referral_fee, 2),
@@ -322,18 +324,38 @@ async def get_stores(user_id: str = Depends(get_current_user)):
     return stores
 
 @api_router.get("/dashboard")
-async def get_dashboard(store_id: Optional[str] = None, days: int = 30, user_id: str = Depends(get_current_user)):
+async def get_dashboard(store_id: Optional[str] = None, days: int = 30, currency: str = "USD", user_id: str = Depends(get_current_user)):
     # Generate orders for specified days
     orders = generate_mock_orders(store_id or "default", days)
     products = generate_mock_products(store_id or "default")
     
-    total_revenue = sum(o["revenue"] for o in orders)
-    total_orders = len(orders)
-    ad_spend = sum(p["ad_spend"] for p in products)
-    net_profit = sum(p["net_profit"] for p in products)
+    # Currency conversion (1 USD = 83 INR approx)
+    conversion_rate = 83 if currency == "INR" else 1
     
-    # Calculate TCOS from products (average TCOS across all products)
+    total_revenue = sum(o["revenue"] for o in orders) * conversion_rate
+    total_orders = len(orders)
+    ad_spend = sum(p["ad_spend"] for p in products) * conversion_rate
+    net_profit = sum(p["net_profit"] for p in products) * conversion_rate
+    
+    # Calculate TCOS from products using user's formula: (ad_spend / revenue) * 100
     avg_tcos = round(sum(p["tcos"] for p in products) / len(products) if len(products) > 0 else 0, 2)
+    
+    # Convert product data to selected currency
+    converted_products = []
+    for p in products:
+        converted_products.append({
+            **p,
+            "revenue": p["revenue"] * conversion_rate,
+            "ad_spend": p["ad_spend"] * conversion_rate,
+            "net_profit": p["net_profit"] * conversion_rate,
+            "product_cost": p["product_cost"] * conversion_rate,
+            "referral_fee": p["referral_fee"] * conversion_rate,
+            "fba_fee": p["fba_fee"] * conversion_rate,
+            "storage_fee": p["storage_fee"] * conversion_rate,
+            "returns": p["returns"] * conversion_rate,
+            "gst": p["gst"] * conversion_rate,
+            "other_charges": p["other_charges"] * conversion_rate
+        })
     
     # Generate chart data for specified days
     orders_chart = []
@@ -342,7 +364,7 @@ async def get_dashboard(store_id: Optional[str] = None, days: int = 30, user_id:
         date = (datetime.now(timezone.utc) - timedelta(days=days-1-i)).strftime("%b %d")
         day_orders = [o for o in orders if (datetime.now(timezone.utc) - datetime.fromisoformat(o["order_date"])).days == (days-1-i)]
         orders_chart.append({"date": date, "orders": len(day_orders)})
-        revenue_chart.append({"date": date, "revenue": round(sum(o["revenue"] for o in day_orders), 2)})
+        revenue_chart.append({"date": date, "revenue": round(sum(o["revenue"] for o in day_orders) * conversion_rate, 2)})
     
     return {
         "total_revenue": round(total_revenue, 2),
@@ -352,11 +374,12 @@ async def get_dashboard(store_id: Optional[str] = None, days: int = 30, user_id:
         "tcos": avg_tcos,
         "roas": round(total_revenue / ad_spend if ad_spend > 0 else 0, 2),
         "acos": round((ad_spend / total_revenue * 100) if total_revenue > 0 else 0, 2),
-        "top_products": sorted(products, key=lambda x: x["revenue"], reverse=True)[:5],
+        "top_products": sorted(converted_products, key=lambda x: x["revenue"], reverse=True)[:5],
         "low_inventory_alerts": len([p for p in products if p["stock_level"] < 50]),
-        "sales_by_marketplace": [{"marketplace": "Amazon.com", "orders": total_orders, "revenue": total_revenue}],
+        "sales_by_marketplace": [{"marketplace": "Amazon.com", "orders": total_orders, "revenue": round(total_revenue, 2)}],
         "orders_chart": orders_chart,
-        "revenue_chart": revenue_chart
+        "revenue_chart": revenue_chart,
+        "currency": currency
     }
 
 @api_router.get("/orders")
