@@ -2,9 +2,10 @@ import React, { useState, useEffect } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { apiClient } from '@/utils/api';
 import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
-import { TrendingUp, TrendingDown, DollarSign, ShoppingCart, AlertTriangle, Target, ArrowUpRight, ArrowDownRight } from 'lucide-react';
+import { TrendingUp, TrendingDown, DollarSign, ShoppingCart, AlertTriangle, Target, ArrowUpRight, ArrowDownRight, Calendar } from 'lucide-react';
 import { toast } from 'sonner';
 
 const MetricCard = ({ title, value = 0, change, icon: Icon, trend, format = 'number' }) => {
@@ -47,14 +48,20 @@ const MetricCard = ({ title, value = 0, change, icon: Icon, trend, format = 'num
 const Dashboard = () => {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [dateRange, setDateRange] = useState('30');
+  const [marketplace, setMarketplace] = useState('all');
 
   useEffect(() => {
     fetchDashboard();
-  }, []);
+  }, [dateRange, marketplace]);
 
   const fetchDashboard = async () => {
     try {
-      const response = await apiClient.get('/dashboard');
+      const params = new URLSearchParams();
+      if (marketplace !== 'all') params.append('marketplace', marketplace);
+      params.append('days', dateRange);
+      
+      const response = await apiClient.get(`/dashboard?${params}`);
       setData(response.data);
     } catch (error) {
       toast.error('Failed to load dashboard');
@@ -76,6 +83,32 @@ const Dashboard = () => {
 
   return (
     <div className="space-y-6 fade-in">
+      {/* Filters */}
+      <div className="flex gap-4">
+        <Select value={dateRange} onValueChange={setDateRange}>
+          <SelectTrigger className="w-48" data-testid="date-range-filter">
+            <Calendar size={16} className="mr-2" />
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="30">Last 30 Days</SelectItem>
+            <SelectItem value="60">Last 60 Days</SelectItem>
+            <SelectItem value="90">Last 90 Days</SelectItem>
+          </SelectContent>
+        </Select>
+
+        <Select value={marketplace} onValueChange={setMarketplace}>
+          <SelectTrigger className="w-48" data-testid="marketplace-filter">
+            <SelectValue placeholder="All Marketplaces" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All Marketplaces</SelectItem>
+            <SelectItem value="Amazon.com">Amazon.com</SelectItem>
+            <SelectItem value="Flipkart">Flipkart</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
+
       {/* Metrics Grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
         <MetricCard

@@ -160,10 +160,10 @@ async def seed_demo_account():
 def calculate_product_metrics(revenue: float, orders: int, product_cost: float, ad_spend: float):
     referral_fee = revenue * 0.15
     fba_fee = orders * 3.50
-    storage_fee = random.uniform(10, 50)
-    returns = revenue * 0.02
-    gst = revenue * 0.18
-    other_charges = random.uniform(5, 25)
+    storage_fee = random.uniform(5, 20)
+    returns = revenue * 0.01
+    gst = revenue * 0.05  # Reduced from 18% to make more realistic
+    other_charges = random.uniform(2, 10)
     
     total_costs = product_cost + referral_fee + fba_fee + ad_spend + storage_fee + returns + gst + other_charges
     net_profit = revenue - total_costs
@@ -203,8 +203,8 @@ def generate_mock_products(store_id: str) -> List[Dict[str, Any]]:
     for name in product_names:
         revenue = round(random.uniform(500, 5000), 2)
         orders = random.randint(20, 150)
-        product_cost = revenue * random.uniform(0.3, 0.5)
-        ad_spend = round(random.uniform(50, 500), 2)
+        product_cost = revenue * random.uniform(0.25, 0.35)  # Reduced from 0.3-0.5 to 0.25-0.35
+        ad_spend = round(random.uniform(30, 300), 2)  # Reduced from 50-500 to 30-300
         
         metrics = calculate_product_metrics(revenue, orders, product_cost, ad_spend)
         
@@ -332,9 +332,8 @@ async def get_dashboard(store_id: Optional[str] = None, days: int = 30, user_id:
     ad_spend = sum(p["ad_spend"] for p in products)
     net_profit = sum(p["net_profit"] for p in products)
     
-    # Calculate TCOS
-    total_costs = sum(p["product_cost"] + p["referral_fee"] + p["fba_fee"] + p["ad_spend"] + p["storage_fee"] + p["returns"] + p["gst"] + p["other_charges"] for p in products)
-    tcos = round((total_costs / total_revenue * 100) if total_revenue > 0 else 0, 2)
+    # Calculate TCOS from products (average TCOS across all products)
+    avg_tcos = round(sum(p["tcos"] for p in products) / len(products) if len(products) > 0 else 0, 2)
     
     # Generate chart data for specified days
     orders_chart = []
@@ -350,7 +349,7 @@ async def get_dashboard(store_id: Optional[str] = None, days: int = 30, user_id:
         "total_orders": total_orders,
         "net_profit": round(net_profit, 2),
         "ad_spend": round(ad_spend, 2),
-        "tcos": tcos,
+        "tcos": avg_tcos,
         "roas": round(total_revenue / ad_spend if ad_spend > 0 else 0, 2),
         "acos": round((ad_spend / total_revenue * 100) if total_revenue > 0 else 0, 2),
         "top_products": sorted(products, key=lambda x: x["revenue"], reverse=True)[:5],
