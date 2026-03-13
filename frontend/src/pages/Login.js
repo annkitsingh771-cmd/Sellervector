@@ -48,12 +48,18 @@ const Login = ({ onLogin }) => {
   return (
     <div className="min-h-screen bg-gradient-to-br from-indigo-50 via-white to-slate-100 flex items-center justify-center p-4">
       <div className="w-full max-w-md">
-        {/* Logo */}
-        <div className="text-center mb-8">
-          <div className="mb-4">
-            <img src="/sellervector-logo.svg" alt="SellerVector" className="h-16 w-auto mx-auto" />
+        {/* Logo - Premium Design */}
+        <div className="text-center mb-10">
+          <div className="mb-5 relative inline-block">
+            <div className="absolute inset-0 bg-indigo-500/10 blur-2xl rounded-full scale-150"></div>
+            <img 
+              src="/sellervector-transparent.svg" 
+              alt="SellerVector" 
+              className="h-20 w-auto mx-auto relative z-10 drop-shadow-2xl" 
+            />
           </div>
-          <p className="text-slate-700 text-lg font-bold tracking-wide">Optimise Scale Dominate</p>
+          <h1 className="text-2xl font-bold text-slate-900 mb-2 tracking-tight">Welcome to SellerVector</h1>
+          <p className="text-indigo-600 text-base font-semibold tracking-[0.15em] uppercase">Optimise Scale Dominate</p>
         </div>
 
         <Card className="bg-white border border-slate-200 shadow-sm rounded-sm">

@@ -35,11 +35,20 @@ const Layout = ({ user, onLogout }) => {
         } bg-slate-950 border-r border-slate-800 transition-all duration-150 flex-shrink-0`}
       >
         <div className="flex flex-col h-full">
-          {/* Logo */}
-          <div className="p-6 border-b border-slate-800 bg-slate-900">
-            <div className="flex flex-col items-center gap-3">
-              <img src="/sellervector-logo.svg" alt="SellerVector" className="h-16 w-auto" />
-              <p className="text-slate-300 text-sm font-bold tracking-wide text-center">Optimise Scale Dominate</p>
+          {/* Logo - Premium Design */}
+          <div className="p-6 border-b border-slate-800 bg-gradient-to-b from-slate-900 to-slate-950">
+            <div className="flex flex-col items-center gap-4">
+              <div className="relative">
+                <div className="absolute inset-0 bg-indigo-500/20 blur-xl rounded-full"></div>
+                <img 
+                  src="/sellervector-transparent.svg" 
+                  alt="SellerVector" 
+                  className="h-16 w-auto relative z-10 drop-shadow-lg" 
+                />
+              </div>
+              <div className="text-center">
+                <p className="text-white text-xs font-bold tracking-[0.2em] uppercase">Optimise Scale Dominate</p>
+              </div>
             </div>
           </div>
 
