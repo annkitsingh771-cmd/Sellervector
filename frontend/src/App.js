@@ -6,6 +6,7 @@ import Dashboard from '@/pages/Dashboard';
 import Orders from '@/pages/Orders';
 import Advertising from '@/pages/Advertising';
 import Campaigns from '@/pages/Campaigns';
+import KeywordReport from '@/pages/KeywordReport';
 import Profit from '@/pages/Profit';
 import Inventory from '@/pages/Inventory';
 import Products from '@/pages/Products';
@@ -58,6 +59,7 @@ function App() {
             <Route path="orders" element={<Orders />} />
             <Route path="advertising" element={<Advertising />} />
             <Route path="campaigns" element={<Campaigns />} />
+            <Route path="keyword-report" element={<KeywordReport />} />
             <Route path="profit" element={<Profit />} />
             <Route path="inventory" element={<Inventory />} />
             <Route path="products" element={<Products />} />

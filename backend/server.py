@@ -272,7 +272,7 @@ def generate_mock_campaigns(store_id: str, with_metrics: bool = True):
 # ============= Routes =============
 @api_router.get("/")
 async def root():
-    return {"message": "SellerOS API", "status": "running"}
+    return {"message": "SellerVector API", "status": "running"}
 
 @api_router.post("/auth/register", response_model=TokenResponse)
 async def register(user_data: UserRegister):

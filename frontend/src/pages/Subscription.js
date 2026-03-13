@@ -130,7 +130,7 @@ const Subscription = () => {
       {/* Compare Features */}
       <Card className="bg-white border border-slate-200 shadow-sm rounded-sm mt-12">
         <CardHeader>
-          <CardTitle className="text-xl" style={{ fontFamily: 'Chivo, sans-serif' }}>Why SellerOS?</CardTitle>
+          <CardTitle className="text-xl" style={{ fontFamily: 'Chivo, sans-serif' }}>Why SellerVector?</CardTitle>
           <CardDescription>Advanced features comparable to Helium 10 and Jungle Scout</CardDescription>
         </CardHeader>
         <CardContent>

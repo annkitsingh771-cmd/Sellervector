@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Outlet, Link, useLocation } from 'react-router-dom';
-import { LayoutDashboard, ShoppingCart, TrendingUp, Target, DollarSign, Package, Box, Users, FileText, Settings, Menu, X, Sparkles, Bell, ChevronDown } from 'lucide-react';
+import { LayoutDashboard, ShoppingCart, TrendingUp, Target, DollarSign, Package, Box, Users, FileText, Settings, Menu, X, Sparkles, Bell, ChevronDown, Key } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import AICopilot from '@/components/AICopilot';
@@ -15,6 +15,7 @@ const Layout = ({ user, onLogout }) => {
     { path: '/orders', icon: ShoppingCart, label: 'Orders' },
     { path: '/advertising', icon: TrendingUp, label: 'Advertising' },
     { path: '/campaigns', icon: Target, label: 'Campaigns' },
+    { path: '/keyword-report', icon: Key, label: 'Keyword Report' },
     { path: '/profit', icon: DollarSign, label: 'Profit Calculator' },
     { path: '/inventory', icon: Package, label: 'Inventory' },
     { path: '/products', icon: Box, label: 'Products' },
@@ -40,7 +41,7 @@ const Layout = ({ user, onLogout }) => {
               <div className="w-8 h-8 bg-indigo-600 rounded-sm flex items-center justify-center">
                 <span className="text-white font-bold text-sm">S</span>
               </div>
-              <span className="text-white font-bold text-lg" style={{ fontFamily: 'Chivo, sans-serif' }}>SellerOS</span>
+              <span className="text-white font-bold text-lg" style={{ fontFamily: 'Chivo, sans-serif' }}>SellerVector</span>
             </div>
             <p className="text-slate-400 text-xs mt-1">E-commerce Command Center</p>
           </div>

@@ -54,7 +54,7 @@ const Login = ({ onLogin }) => {
             <div className="w-12 h-12 bg-indigo-700 rounded-sm flex items-center justify-center">
               <span className="text-white font-bold text-xl">S</span>
             </div>
-            <span className="text-4xl font-bold text-slate-900" style={{ fontFamily: 'Chivo, sans-serif' }}>SellerOS</span>
+            <span className="text-4xl font-bold text-slate-900" style={{ fontFamily: 'Chivo, sans-serif' }}>SellerVector</span>
           </div>
           <p className="text-slate-600">The Operating System for Modern E-commerce Empires</p>
         </div>
@@ -176,7 +176,7 @@ const Login = ({ onLogin }) => {
         </Card>
 
         <p className="text-center text-sm text-slate-500 mt-6">
-          © 2026 SellerOS. Powered by AI.
+          © 2026 SellerVector. Powered by AI.
         </p>
       </div>
     </div>
