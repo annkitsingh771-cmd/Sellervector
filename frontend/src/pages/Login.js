@@ -51,10 +51,7 @@ const Login = ({ onLogin }) => {
         {/* Logo */}
         <div className="text-center mb-8">
           <div className="inline-flex items-center gap-3 mb-3">
-            <div className="w-12 h-12 bg-indigo-700 rounded-sm flex items-center justify-center">
-              <span className="text-white font-bold text-xl">S</span>
-            </div>
-            <span className="text-4xl font-bold text-slate-900" style={{ fontFamily: 'Chivo, sans-serif' }}>SellerVector</span>
+            <img src="/sellervector-logo.svg" alt="SellerVector" className="h-12 w-auto" />
           </div>
           <p className="text-slate-600">The Operating System for Modern E-commerce Empires</p>
         </div>

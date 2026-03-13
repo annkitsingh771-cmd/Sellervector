@@ -38,10 +38,7 @@ const Layout = ({ user, onLogout }) => {
           {/* Logo */}
           <div className="p-5 border-b border-slate-800">
             <div className="flex items-center gap-3">
-              <div className="w-8 h-8 bg-indigo-600 rounded-sm flex items-center justify-center">
-                <span className="text-white font-bold text-sm">S</span>
-              </div>
-              <span className="text-white font-bold text-lg" style={{ fontFamily: 'Chivo, sans-serif' }}>SellerVector</span>
+              <img src="/sellervector-logo.svg" alt="SellerVector" className="h-8 w-auto" />
             </div>
             <p className="text-slate-400 text-xs mt-1">E-commerce Command Center</p>
           </div>
