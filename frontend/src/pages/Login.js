@@ -50,10 +50,10 @@ const Login = ({ onLogin }) => {
       <div className="w-full max-w-md">
         {/* Logo */}
         <div className="text-center mb-8">
-          <div className="inline-flex items-center gap-3 mb-3">
-            <img src="/sellervector-logo.svg" alt="SellerVector" className="h-12 w-auto" />
+          <div className="mb-4">
+            <img src="/sellervector-logo.svg" alt="SellerVector" className="h-16 w-auto mx-auto" />
           </div>
-          <p className="text-slate-600 font-semibold">Optimise Scale Dominate</p>
+          <p className="text-slate-700 text-lg font-bold tracking-wide">Optimise Scale Dominate</p>
         </div>
 
         <Card className="bg-white border border-slate-200 shadow-sm rounded-sm">

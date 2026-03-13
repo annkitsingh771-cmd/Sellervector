@@ -36,11 +36,11 @@ const Layout = ({ user, onLogout }) => {
       >
         <div className="flex flex-col h-full">
           {/* Logo */}
-          <div className="p-5 border-b border-slate-800">
-            <div className="flex items-center gap-3">
-              <img src="/sellervector-logo.svg" alt="SellerVector" className="h-8 w-auto" />
+          <div className="p-6 border-b border-slate-800 bg-slate-900">
+            <div className="flex flex-col items-center gap-3">
+              <img src="/sellervector-logo.svg" alt="SellerVector" className="h-14 w-auto" />
+              <p className="text-slate-300 text-sm font-semibold tracking-wide text-center">Optimise Scale Dominate</p>
             </div>
-            <p className="text-slate-400 text-xs mt-1">Optimise Scale Dominate</p>
           </div>
 
           {/* Navigation */}
