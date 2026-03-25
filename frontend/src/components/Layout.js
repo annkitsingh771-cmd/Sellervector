@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Outlet, Link, useLocation } from 'react-router-dom';
-import { LayoutDashboard, ShoppingCart, TrendingUp, Target, DollarSign, Package, Box, Users, FileText, Settings, Menu, X, Sparkles, Bell, ChevronDown, Key } from 'lucide-react';
+import { LayoutDashboard, ShoppingCart, TrendingUp, Target, DollarSign, Package, Box, Users, FileText, Settings, Menu, X, Sparkles, Bell, ChevronDown, Key, Zap, Clock, Calculator, Rocket } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import AICopilot from '@/components/AICopilot';
@@ -13,15 +13,23 @@ const Layout = ({ user, onLogout }) => {
   const menuItems = [
     { path: '/', icon: LayoutDashboard, label: 'Dashboard' },
     { path: '/orders', icon: ShoppingCart, label: 'Orders' },
-    { path: '/advertising', icon: TrendingUp, label: 'Advertising' },
+    { type: 'divider', label: 'PPC Automation' },
+    { path: '/optimization', icon: Zap, label: 'Daily Optimization', badge: '5' },
+    { path: '/campaign-builder', icon: Rocket, label: 'Campaign Builder' },
     { path: '/campaigns', icon: Target, label: 'Campaigns' },
+    { path: '/advertising', icon: TrendingUp, label: 'Advertising' },
+    { path: '/budget-calculator', icon: Calculator, label: 'Budget Calculator' },
+    { path: '/day-parting', icon: Clock, label: 'Day Parting' },
     { path: '/keyword-report', icon: Key, label: 'Keyword Report' },
+    { type: 'divider', label: 'Analytics & Inventory' },
     { path: '/profit', icon: DollarSign, label: 'Profit Calculator' },
     { path: '/inventory', icon: Package, label: 'Inventory' },
     { path: '/products', icon: Box, label: 'Products' },
     { path: '/fba-shipments', icon: Package, label: 'FBA Shipments' },
     { path: '/competitors', icon: Users, label: 'Competitors' },
+    { type: 'divider', label: 'Settings' },
     { path: '/reports', icon: FileText, label: 'Reports' },
+    { path: '/notifications', icon: Bell, label: 'Notifications' },
     { path: '/subscription', icon: Target, label: 'Subscription' },
     { path: '/settings', icon: Settings, label: 'Settings' },
   ];
@@ -54,7 +62,14 @@ const Layout = ({ user, onLogout }) => {
 
           {/* Navigation */}
           <nav className="flex-1 overflow-y-auto p-3">
-            {menuItems.map((item) => {
+            {menuItems.map((item, index) => {
+              if (item.type === 'divider') {
+                return (
+                  <div key={index} className="mt-4 mb-2 px-3">
+                    <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider">{item.label}</p>
+                  </div>
+                );
+              }
               const Icon = item.icon;
               const isActive = location.pathname === item.path;
               return (
@@ -69,7 +84,12 @@ const Layout = ({ user, onLogout }) => {
                   }`}
                 >
                   <Icon size={18} strokeWidth={1.5} />
-                  <span className="text-sm font-medium">{item.label}</span>
+                  <span className="text-sm font-medium flex-1">{item.label}</span>
+                  {item.badge && (
+                    <Badge className="bg-rose-500 text-white text-xs px-1.5 min-w-[20px] h-5 flex items-center justify-center">
+                      {item.badge}
+                    </Badge>
+                  )}
                 </Link>
               );
             })}

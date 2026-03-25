@@ -15,6 +15,11 @@ import Reports from '@/pages/Reports';
 import Settings from '@/pages/Settings';
 import FBAShipmentPlanner from '@/pages/FBAShipmentPlanner';
 import Subscription from '@/pages/Subscription';
+import BudgetCalculator from '@/pages/BudgetCalculator';
+import DayParting from '@/pages/DayParting';
+import Optimization from '@/pages/Optimization';
+import CampaignBuilder from '@/pages/CampaignBuilder';
+import NotificationCenter from '@/pages/NotificationCenter';
 import Layout from '@/components/Layout';
 import '@/App.css';
 
@@ -59,13 +64,18 @@ function App() {
             <Route path="orders" element={<Orders />} />
             <Route path="advertising" element={<Advertising />} />
             <Route path="campaigns" element={<Campaigns />} />
+            <Route path="campaign-builder" element={<CampaignBuilder />} />
             <Route path="keyword-report" element={<KeywordReport />} />
+            <Route path="optimization" element={<Optimization />} />
+            <Route path="budget-calculator" element={<BudgetCalculator />} />
+            <Route path="day-parting" element={<DayParting />} />
             <Route path="profit" element={<Profit />} />
             <Route path="inventory" element={<Inventory />} />
             <Route path="products" element={<Products />} />
             <Route path="competitors" element={<Competitors />} />
             <Route path="reports" element={<Reports />} />
             <Route path="fba-shipments" element={<FBAShipmentPlanner />} />
+            <Route path="notifications" element={<NotificationCenter />} />
             <Route path="subscription" element={<Subscription />} />
             <Route path="settings" element={<Settings />} />
           </Route>

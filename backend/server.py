@@ -683,6 +683,452 @@ async def get_notifications(user_id: str = Depends(get_current_user)):
     ]
     return {"notifications": notifications}
 
+# ============= NEW PPC AUTOMATION ENDPOINTS =============
+
+# Budget Calculator & ROAS Predictor
+@api_router.post("/budget-calculator")
+async def calculate_budget(data: Dict[str, Any], user_id: str = Depends(get_current_user)):
+    budget = float(data.get("budget", 1000))
+    cpc = float(data.get("cpc", 0.50))
+    cvr = float(data.get("cvr", 10))  # Conversion rate %
+    avg_order_value = float(data.get("avg_order_value", 50))
+    target_acos = float(data.get("target_acos", 30))
+    
+    # Calculations
+    estimated_clicks = int(budget / cpc) if cpc > 0 else 0
+    estimated_orders = int(estimated_clicks * (cvr / 100))
+    estimated_sales = round(estimated_orders * avg_order_value, 2)
+    estimated_roas = round(estimated_sales / budget, 2) if budget > 0 else 0
+    estimated_acos = round((budget / estimated_sales * 100), 2) if estimated_sales > 0 else 0
+    profit_after_ads = round(estimated_sales - budget, 2)
+    
+    # Recommendations
+    recommendations = []
+    if estimated_acos > target_acos:
+        recommendations.append(f"Your estimated ACOS ({estimated_acos}%) exceeds target ({target_acos}%). Consider reducing CPC or improving CVR.")
+    if estimated_roas < 2:
+        recommendations.append("ROAS below 2x - campaigns may not be profitable. Review product pricing or reduce ad spend.")
+    if cvr < 8:
+        recommendations.append("Low conversion rate. Improve listing quality, images, and reviews to boost CVR.")
+    if estimated_roas >= 4:
+        recommendations.append("Excellent ROAS potential! Consider increasing budget to scale.")
+    
+    return {
+        "input": {"budget": budget, "cpc": cpc, "cvr": cvr, "avg_order_value": avg_order_value, "target_acos": target_acos},
+        "predictions": {
+            "estimated_clicks": estimated_clicks,
+            "estimated_orders": estimated_orders,
+            "estimated_sales": estimated_sales,
+            "estimated_roas": estimated_roas,
+            "estimated_acos": estimated_acos,
+            "profit_after_ads": profit_after_ads
+        },
+        "recommendations": recommendations
+    }
+
+# ASIN/SKU Budget Planning
+@api_router.get("/budget-planner/products")
+async def get_product_budget_plans(user_id: str = Depends(get_current_user)):
+    products = generate_mock_products("default")
+    budget_plans = []
+    
+    for p in products:
+        daily_budget = round(random.uniform(20, 100), 2)
+        monthly_budget = daily_budget * 30
+        current_spend = round(random.uniform(daily_budget * 0.5, daily_budget * 1.2), 2)
+        
+        budget_plans.append({
+            "product_id": p["id"],
+            "product_name": p["name"],
+            "asin": p["asin"],
+            "sku": p["sku"],
+            "daily_budget": daily_budget,
+            "monthly_budget": round(monthly_budget, 2),
+            "current_daily_spend": current_spend,
+            "budget_utilization": round((current_spend / daily_budget * 100), 1) if daily_budget > 0 else 0,
+            "recommended_budget": round(daily_budget * 1.2 if p["conversion_rate"] > 15 else daily_budget * 0.9, 2),
+            "acos": round(random.uniform(15, 40), 2),
+            "roas": round(random.uniform(2, 6), 2)
+        })
+    
+    return {"budget_plans": budget_plans}
+
+@api_router.patch("/budget-planner/products/{product_id}")
+async def update_product_budget(product_id: str, data: Dict[str, Any], user_id: str = Depends(get_current_user)):
+    return {"message": "Budget updated successfully", "product_id": product_id, "new_budget": data.get("daily_budget")}
+
+# Day Parting & Peak Hours Analysis
+@api_router.get("/dayparting/analysis")
+async def get_dayparting_analysis(user_id: str = Depends(get_current_user)):
+    # Generate hourly performance data
+    hourly_data = []
+    peak_hours = [10, 11, 14, 15, 20, 21]  # Mock peak hours
+    
+    for hour in range(24):
+        is_peak = hour in peak_hours
+        base_sales = 15 if is_peak else 5
+        base_orders = 3 if is_peak else 1
+        
+        hourly_data.append({
+            "hour": hour,
+            "hour_label": f"{hour:02d}:00",
+            "sales": round(base_sales + random.uniform(-3, 8), 2),
+            "orders": base_orders + random.randint(0, 3),
+            "clicks": random.randint(20, 100) if is_peak else random.randint(5, 30),
+            "spend": round(random.uniform(5, 25) if is_peak else random.uniform(2, 10), 2),
+            "acos": round(random.uniform(18, 35), 2),
+            "is_peak": is_peak
+        })
+    
+    # Day of week performance
+    daily_data = []
+    days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    for day in days:
+        is_weekend = day in ["Saturday", "Sunday"]
+        daily_data.append({
+            "day": day,
+            "sales": round(random.uniform(150, 400) if is_weekend else random.uniform(80, 250), 2),
+            "orders": random.randint(15, 40) if is_weekend else random.randint(8, 25),
+            "spend": round(random.uniform(40, 100), 2),
+            "acos": round(random.uniform(20, 35), 2),
+            "is_high_performance": is_weekend
+        })
+    
+    return {
+        "hourly_data": hourly_data,
+        "daily_data": daily_data,
+        "peak_hours": peak_hours,
+        "recommendations": [
+            "Increase bids by 20% during peak hours (10-11 AM, 2-3 PM, 8-9 PM)",
+            "Reduce bids by 30% during low-traffic hours (12 AM - 6 AM)",
+            "Weekend performance is 40% higher - consider increasing weekend budgets"
+        ]
+    }
+
+@api_router.get("/dayparting/schedule")
+async def get_dayparting_schedule(user_id: str = Depends(get_current_user)):
+    schedule = []
+    for hour in range(24):
+        schedule.append({
+            "hour": hour,
+            "hour_label": f"{hour:02d}:00 - {(hour+1)%24:02d}:00",
+            "bid_adjustment": 20 if hour in [10, 11, 14, 15, 20, 21] else (-30 if hour < 6 else 0),
+            "enabled": True
+        })
+    return {"schedule": schedule}
+
+@api_router.post("/dayparting/schedule")
+async def update_dayparting_schedule(data: Dict[str, Any], user_id: str = Depends(get_current_user)):
+    return {"message": "Day parting schedule updated", "schedule": data.get("schedule")}
+
+# Daily Optimization Hub
+@api_router.get("/optimization/suggestions")
+async def get_optimization_suggestions(user_id: str = Depends(get_current_user)):
+    suggestions = [
+        {
+            "id": str(uuid.uuid4()),
+            "type": "bid_decrease",
+            "priority": "high",
+            "title": "Reduce bid for high ACOS keyword",
+            "description": "Keyword 'wireless bluetooth headphones' has 45% ACOS. Reduce bid from $1.25 to $0.95.",
+            "campaign_name": "Headphones - Manual Campaign",
+            "keyword": "wireless bluetooth headphones",
+            "current_bid": 1.25,
+            "suggested_bid": 0.95,
+            "current_acos": 45.2,
+            "expected_acos": 32.5,
+            "estimated_savings": 85.50,
+            "action": "reduce_bid",
+            "status": "pending"
+        },
+        {
+            "id": str(uuid.uuid4()),
+            "type": "bid_increase",
+            "priority": "high",
+            "title": "Increase bid for profitable keyword",
+            "description": "Keyword 'best running shoes' has 12% ACOS with high CVR. Increase bid to capture more traffic.",
+            "campaign_name": "Running Shoes - Manual",
+            "keyword": "best running shoes",
+            "current_bid": 0.85,
+            "suggested_bid": 1.15,
+            "current_acos": 12.3,
+            "expected_acos": 15.0,
+            "estimated_revenue_gain": 250.00,
+            "action": "increase_bid",
+            "status": "pending"
+        },
+        {
+            "id": str(uuid.uuid4()),
+            "type": "pause_keyword",
+            "priority": "medium",
+            "title": "Pause non-converting keyword",
+            "description": "Keyword 'cheap headphones free shipping' spent $120 with 0 sales. Recommend pausing.",
+            "campaign_name": "Headphones - Broad Match",
+            "keyword": "cheap headphones free shipping",
+            "spend": 120.00,
+            "sales": 0,
+            "clicks": 180,
+            "action": "pause_keyword",
+            "status": "pending"
+        },
+        {
+            "id": str(uuid.uuid4()),
+            "type": "budget_increase",
+            "priority": "medium",
+            "title": "Increase campaign budget",
+            "description": "Campaign 'Smartwatch - Auto' is hitting budget cap by 2 PM daily. Missing 35% of potential traffic.",
+            "campaign_name": "Smartwatch - Auto",
+            "current_budget": 50.00,
+            "suggested_budget": 75.00,
+            "estimated_additional_sales": 180.00,
+            "action": "increase_budget",
+            "status": "pending"
+        },
+        {
+            "id": str(uuid.uuid4()),
+            "type": "negative_keyword",
+            "priority": "low",
+            "title": "Add negative keyword",
+            "description": "Search term 'free headphones' is wasting spend. Add as negative keyword.",
+            "campaign_name": "Headphones - Auto Campaign",
+            "keyword": "free headphones",
+            "spend": 45.00,
+            "sales": 0,
+            "action": "add_negative",
+            "status": "pending"
+        }
+    ]
+    
+    summary = {
+        "total_suggestions": len(suggestions),
+        "high_priority": len([s for s in suggestions if s["priority"] == "high"]),
+        "potential_savings": sum(s.get("estimated_savings", 0) for s in suggestions),
+        "potential_revenue_gain": sum(s.get("estimated_revenue_gain", 0) for s in suggestions)
+    }
+    
+    return {"suggestions": suggestions, "summary": summary}
+
+@api_router.post("/optimization/apply/{suggestion_id}")
+async def apply_optimization(suggestion_id: str, user_id: str = Depends(get_current_user)):
+    # In real implementation, this would call Amazon API
+    return {
+        "message": "Optimization applied successfully",
+        "suggestion_id": suggestion_id,
+        "status": "applied",
+        "applied_at": datetime.now(timezone.utc).isoformat()
+    }
+
+@api_router.post("/optimization/apply-all")
+async def apply_all_optimizations(data: Dict[str, Any], user_id: str = Depends(get_current_user)):
+    suggestion_ids = data.get("suggestion_ids", [])
+    return {
+        "message": f"Applied {len(suggestion_ids)} optimizations",
+        "applied_count": len(suggestion_ids),
+        "applied_at": datetime.now(timezone.utc).isoformat()
+    }
+
+# AI Campaign Builder
+@api_router.get("/campaign-builder/products")
+async def get_products_for_campaign(user_id: str = Depends(get_current_user)):
+    products = generate_mock_products("default")
+    return {"products": [{"id": p["id"], "name": p["name"], "asin": p["asin"], "sku": p["sku"], "price": p["price"]} for p in products]}
+
+@api_router.post("/campaign-builder/generate")
+async def generate_ai_campaign(data: Dict[str, Any], user_id: str = Depends(get_current_user)):
+    product_id = data.get("product_id")
+    product_name = data.get("product_name", "Product")
+    target_acos = data.get("target_acos", 30)
+    target_roas = data.get("target_roas", 3.5)
+    daily_budget = data.get("daily_budget", 50)
+    campaign_types = data.get("campaign_types", ["sponsored_products", "sponsored_brands", "sponsored_display"])
+    
+    generated_campaigns = []
+    
+    if "sponsored_products" in campaign_types:
+        # Auto Campaign
+        generated_campaigns.append({
+            "id": str(uuid.uuid4()),
+            "campaign_type": "Sponsored Products - Auto",
+            "campaign_name": f"{product_name} - SP Auto",
+            "targeting_type": "auto",
+            "daily_budget": round(daily_budget * 0.3, 2),
+            "default_bid": round(0.75 * (target_acos / 30), 2),
+            "ad_groups": [
+                {"name": "Close Match", "bid": round(0.85 * (target_acos / 30), 2)},
+                {"name": "Loose Match", "bid": round(0.65 * (target_acos / 30), 2)},
+                {"name": "Substitutes", "bid": round(0.70 * (target_acos / 30), 2)},
+                {"name": "Complements", "bid": round(0.60 * (target_acos / 30), 2)}
+            ],
+            "status": "draft"
+        })
+        
+        # Manual - Exact Match
+        generated_campaigns.append({
+            "id": str(uuid.uuid4()),
+            "campaign_type": "Sponsored Products - Manual Exact",
+            "campaign_name": f"{product_name} - SP Exact",
+            "targeting_type": "manual",
+            "match_type": "exact",
+            "daily_budget": round(daily_budget * 0.35, 2),
+            "keywords": [
+                {"keyword": product_name.lower(), "bid": round(1.20 * (target_acos / 30), 2), "match_type": "exact"},
+                {"keyword": f"best {product_name.lower()}", "bid": round(1.10 * (target_acos / 30), 2), "match_type": "exact"},
+                {"keyword": f"{product_name.lower()} for sale", "bid": round(1.00 * (target_acos / 30), 2), "match_type": "exact"}
+            ],
+            "status": "draft"
+        })
+        
+        # Manual - Phrase Match
+        generated_campaigns.append({
+            "id": str(uuid.uuid4()),
+            "campaign_type": "Sponsored Products - Manual Phrase",
+            "campaign_name": f"{product_name} - SP Phrase",
+            "targeting_type": "manual",
+            "match_type": "phrase",
+            "daily_budget": round(daily_budget * 0.2, 2),
+            "keywords": [
+                {"keyword": product_name.lower(), "bid": round(0.90 * (target_acos / 30), 2), "match_type": "phrase"},
+                {"keyword": f"buy {product_name.lower()}", "bid": round(0.85 * (target_acos / 30), 2), "match_type": "phrase"}
+            ],
+            "status": "draft"
+        })
+    
+    if "sponsored_brands" in campaign_types:
+        generated_campaigns.append({
+            "id": str(uuid.uuid4()),
+            "campaign_type": "Sponsored Brands",
+            "campaign_name": f"{product_name} - SB Video",
+            "targeting_type": "keyword",
+            "daily_budget": round(daily_budget * 0.1, 2),
+            "creative_type": "video",
+            "keywords": [
+                {"keyword": product_name.lower(), "bid": round(1.50 * (target_acos / 30), 2), "match_type": "broad"}
+            ],
+            "status": "draft"
+        })
+    
+    if "sponsored_display" in campaign_types:
+        generated_campaigns.append({
+            "id": str(uuid.uuid4()),
+            "campaign_type": "Sponsored Display",
+            "campaign_name": f"{product_name} - SD Retargeting",
+            "targeting_type": "audience",
+            "daily_budget": round(daily_budget * 0.05, 2),
+            "audiences": ["Views remarketing", "Purchases remarketing"],
+            "status": "draft"
+        })
+    
+    return {
+        "product_id": product_id,
+        "product_name": product_name,
+        "target_metrics": {"target_acos": target_acos, "target_roas": target_roas},
+        "total_daily_budget": daily_budget,
+        "campaigns": generated_campaigns,
+        "strategy_summary": f"Created {len(generated_campaigns)} campaigns optimized for {target_acos}% ACOS target. Budget distributed across campaign types for maximum coverage."
+    }
+
+@api_router.post("/campaign-builder/launch")
+async def launch_campaigns(data: Dict[str, Any], user_id: str = Depends(get_current_user)):
+    campaigns = data.get("campaigns", [])
+    # In real implementation, this would call Amazon Advertising API
+    launched = []
+    for campaign in campaigns:
+        launched.append({
+            "campaign_id": campaign.get("id"),
+            "campaign_name": campaign.get("campaign_name"),
+            "status": "live",
+            "launched_at": datetime.now(timezone.utc).isoformat()
+        })
+    
+    return {
+        "message": f"Successfully launched {len(launched)} campaigns",
+        "launched_campaigns": launched
+    }
+
+# Notification Settings & History
+@api_router.get("/notification-settings")
+async def get_notification_settings(user_id: str = Depends(get_current_user)):
+    settings = {
+        "email_notifications": True,
+        "in_app_notifications": True,
+        "daily_optimization_alerts": True,
+        "budget_alerts": True,
+        "performance_alerts": True,
+        "inventory_alerts": True,
+        "email_frequency": "daily",  # daily, weekly, realtime
+        "email_address": "demo@selleros.com"
+    }
+    return {"settings": settings}
+
+@api_router.patch("/notification-settings")
+async def update_notification_settings(data: Dict[str, Any], user_id: str = Depends(get_current_user)):
+    # In real implementation, save to database
+    return {"message": "Notification settings updated", "settings": data}
+
+@api_router.get("/notifications/history")
+async def get_notification_history(user_id: str = Depends(get_current_user)):
+    notifications = [
+        {
+            "id": str(uuid.uuid4()),
+            "type": "optimization",
+            "priority": "high",
+            "title": "Daily Optimization Ready",
+            "message": "5 optimization suggestions available. Potential savings: $285.50",
+            "timestamp": (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),
+            "read": False,
+            "action_url": "/optimization"
+        },
+        {
+            "id": str(uuid.uuid4()),
+            "type": "budget",
+            "priority": "medium",
+            "title": "Budget Alert",
+            "message": "Campaign 'Headphones Auto' reached 90% of daily budget by 2 PM",
+            "timestamp": (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat(),
+            "read": False,
+            "action_url": "/budget-planner"
+        },
+        {
+            "id": str(uuid.uuid4()),
+            "type": "performance",
+            "priority": "high",
+            "title": "High ACOS Alert",
+            "message": "Campaign 'Running Shoes Manual' ACOS increased to 42% (target: 30%)",
+            "timestamp": (datetime.now(timezone.utc) - timedelta(hours=5)).isoformat(),
+            "read": True,
+            "action_url": "/campaigns"
+        },
+        {
+            "id": str(uuid.uuid4()),
+            "type": "success",
+            "priority": "low",
+            "title": "Campaign Launched",
+            "message": "Successfully launched 3 new campaigns for 'Smartwatch Pro'",
+            "timestamp": (datetime.now(timezone.utc) - timedelta(hours=8)).isoformat(),
+            "read": True,
+            "action_url": "/campaigns"
+        },
+        {
+            "id": str(uuid.uuid4()),
+            "type": "inventory",
+            "priority": "medium",
+            "title": "Low Inventory Warning",
+            "message": "Wireless Headphones stock at 15 units. Consider reducing ad spend or restocking.",
+            "timestamp": (datetime.now(timezone.utc) - timedelta(hours=12)).isoformat(),
+            "read": True,
+            "action_url": "/inventory"
+        }
+    ]
+    
+    return {
+        "notifications": notifications,
+        "unread_count": len([n for n in notifications if not n["read"]])
+    }
+
+@api_router.patch("/notifications/{notification_id}/read")
+async def mark_notification_read(notification_id: str, user_id: str = Depends(get_current_user)):
+    return {"message": "Notification marked as read", "notification_id": notification_id}
+
 @api_router.get("/subscription/plans")
 async def get_subscription_plans():
     plans = [
