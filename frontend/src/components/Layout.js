@@ -12,7 +12,6 @@ const Layout = ({ user, onLogout }) => {
 
   const menuItems = [
     { path: '/', icon: LayoutDashboard, label: 'Dashboard' },
-    { path: '/orders', icon: ShoppingCart, label: 'Orders' },
     { type: 'divider', label: 'PPC Automation' },
     { path: '/optimization', icon: Zap, label: 'Daily Optimization', badge: '5' },
     { path: '/campaign-builder', icon: Rocket, label: 'Campaign Builder' },
