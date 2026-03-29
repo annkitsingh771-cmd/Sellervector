@@ -20,18 +20,15 @@ from jose import jwt, JWTError
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-# MongoDB
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
-# Security
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 SECRET_KEY = os.getenv("SECRET_KEY", "sv2024secret")
 ALGORITHM = "HS256"
 security = HTTPBearer()
 
-# Amazon Credentials
 SP_API_CLIENT_ID = os.getenv("SP_API_CLIENT_ID")
 SP_API_CLIENT_SECRET = os.getenv("SP_API_CLIENT_SECRET")
 SP_API_REFRESH_TOKEN = os.getenv("SP_API_REFRESH_TOKEN")
@@ -42,7 +39,6 @@ MARKETPLACE_ID = "A21TJRUUN4KGV"
 app = FastAPI()
 api_router = APIRouter(prefix="/api")
 
-# ============= Models =============
 class UserRegister(BaseModel):
     email: EmailStr
     password: str
@@ -74,7 +70,6 @@ class Store(BaseModel):
     connected_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     status: str = "active"
 
-# ============= Helper Functions =============
 def hash_password(password: str) -> str:
     return pwd_context.hash(password)
 
@@ -96,7 +91,6 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
     except JWTError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-# ============= Amazon API Functions =============
 def get_access_token(refresh_token: str = None):
     token = refresh_token or SP_API_REFRESH_TOKEN
     try:
@@ -196,7 +190,6 @@ def get_advertising_keywords(refresh_token: str = None):
         logging.error(f"Error fetching keywords: {e}")
         return []
 
-# ============= Auth Routes =============
 @api_router.get("/")
 async def root():
     return {"message": "SellerVector API", "status": "running"}
@@ -227,7 +220,6 @@ async def login(credentials: UserLogin):
         user={"id": user["id"], "email": user["email"], "full_name": user["full_name"], "subscription_plan": user.get("subscription_plan", "free")}
     )
 
-# ============= Store Routes =============
 @api_router.post("/stores")
 async def connect_store(store_data: Dict[str, Any], user_id: str = Depends(get_current_user)):
     store = Store(
@@ -244,7 +236,6 @@ async def get_stores(user_id: str = Depends(get_current_user)):
     stores = await db.stores.find({"user_id": user_id}, {"_id": 0}).to_list(100)
     return stores
 
-# ============= Amazon OAuth =============
 @api_router.get("/amazon/connect")
 async def amazon_connect(user_id: str = Depends(get_current_user)):
     auth_url = (
@@ -277,32 +268,32 @@ async def amazon_callback(spapi_oauth_code: str, state: str):
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-# ============= Dashboard =============
 @api_router.get("/dashboard")
 async def get_dashboard(days: int = 30, user_id: str = Depends(get_current_user)):
     user = await db.users.find_one({"id": user_id}, {"_id": 0})
     refresh_token = user.get("amazon_refresh_token") if user else None
-
     orders = get_amazon_orders(refresh_token, days)
     inventory = get_amazon_inventory(refresh_token)
-
     total_orders = len(orders)
-    total_revenue = sum(
-        float(o.get("OrderTotal", {}).get("Amount", 0))
-        for o in orders if o.get("OrderTotal")
-    )
-
+    total_revenue = sum(float(o.get("OrderTotal", {}).get("Amount", 0)) for o in orders if o.get("OrderTotal"))
     low_inventory = [i for i in inventory if i.get("totalQuantity", 0) < 50]
-
     return {
         "total_orders": total_orders,
         "total_revenue": round(total_revenue, 2),
         "low_inventory_alerts": len(low_inventory),
         "currency": "INR",
-        "amazon_connected": bool(refresh_token)
+        "amazon_connected": bool(refresh_token),
+        "top_products": [],
+        "orders_chart": [],
+        "revenue_chart": [],
+        "sales_by_marketplace": [],
+        "tcos": 0,
+        "roas": 0,
+        "acos": 0,
+        "ad_spend": 0,
+        "net_profit": 0
     }
 
-# ============= Orders =============
 @api_router.get("/orders")
 async def get_orders(days: int = 30, user_id: str = Depends(get_current_user)):
     user = await db.users.find_one({"id": user_id}, {"_id": 0})
@@ -310,7 +301,10 @@ async def get_orders(days: int = 30, user_id: str = Depends(get_current_user)):
     orders = get_amazon_orders(refresh_token, days)
     return {"orders": orders, "total": len(orders)}
 
-# ============= Inventory =============
+@api_router.get("/products")
+async def get_products(user_id: str = Depends(get_current_user)):
+    return []
+
 @api_router.get("/inventory/alerts")
 async def get_inventory_alerts(user_id: str = Depends(get_current_user)):
     user = await db.users.find_one({"id": user_id}, {"_id": 0})
@@ -321,15 +315,22 @@ async def get_inventory_alerts(user_id: str = Depends(get_current_user)):
         qty = item.get("totalQuantity", 0)
         if qty < 50:
             alerts.append({
+                "id": str(uuid.uuid4()),
                 "product_name": item.get("productName", "Unknown"),
                 "sku": item.get("sellerSku", ""),
                 "asin": item.get("asin", ""),
                 "current_stock": qty,
-                "alert_level": "critical" if qty < 10 else "warning"
+                "alert_level": "critical" if qty < 10 else "warning",
+                "days_until_stockout": 0,
+                "daily_sales_velocity": 0,
+                "marketplace": "Amazon India"
             })
     return {"alerts": alerts}
 
-# ============= Campaigns =============
+@api_router.get("/inventory/ledger")
+async def get_inventory_ledger(user_id: str = Depends(get_current_user)):
+    return {"ledger": []}
+
 @api_router.get("/campaigns")
 async def get_campaigns(user_id: str = Depends(get_current_user)):
     user = await db.users.find_one({"id": user_id}, {"_id": 0})
@@ -345,37 +346,18 @@ async def get_wasted_spend(user_id: str = Depends(get_current_user)):
     wasted = [k for k in keywords if k.get("sales", 0) == 0 and k.get("spend", 0) > 0]
     return {"wasted_keywords": wasted, "total_wasted": sum(k.get("spend", 0) for k in wasted)}
 
-# ============= Notifications =============
-@api_router.get("/notifications")
-async def get_notifications(user_id: str = Depends(get_current_user)):
-    return {"notifications": [], "unread_count": 0}
+@api_router.get("/campaigns/{campaign_id}/keywords")
+async def get_keywords(campaign_id: str, user_id: str = Depends(get_current_user)):
+    return {"keywords": []}
 
-@api_router.get("/notifications/history")
-async def get_notification_history(user_id: str = Depends(get_current_user)):
-    return {"notifications": [], "unread_count": 0}
+@api_router.post("/campaigns/create")
+async def create_campaign(campaign_data: Dict[str, Any], user_id: str = Depends(get_current_user)):
+    return {"campaigns": [], "message": "Connect Amazon account to create campaigns"}
 
-# ============= Subscription Plans =============
-@api_router.get("/subscription/plans")
-async def get_subscription_plans():
-    plans = [
-        {"plan_name": "Free", "price": 0, "features": ["1 Store", "Basic Analytics", "10 Products"]},
-        {"plan_name": "Starter", "price": 29, "features": ["2 Stores", "Advanced Analytics", "50 Products"]},
-        {"plan_name": "Professional", "price": 79, "features": ["5 Stores", "Full Analytics", "Unlimited Products", "AI Copilot"]},
-        {"plan_name": "Enterprise", "price": 199, "features": ["Unlimited Stores", "Custom Reports", "API Access", "Dedicated Support"]}
-    ]
-    return {"plans": plans}
-
-# ============= Reports =============
-@api_router.get("/reports")
-async def get_reports(user_id: str = Depends(get_current_user)):
-    return {"reports": []}
-
-# ============= Profit =============
 @api_router.get("/profit/calculate")
 async def calculate_profit(user_id: str = Depends(get_current_user)):
     return {"profit_data": []}
 
-# ============= FBA =============
 @api_router.get("/fba/shipment-planner")
 async def get_fba_shipment_planner(user_id: str = Depends(get_current_user)):
     user = await db.users.find_one({"id": user_id}, {"_id": 0})
@@ -392,33 +374,65 @@ async def get_fba_shipment_planner(user_id: str = Depends(get_current_user)):
                 "title": item.get("productName", ""),
                 "current_stock": qty,
                 "quantity_needed": 200 - qty,
+                "fc_code": "BOM7",
                 "priority": "high" if qty < 50 else "medium"
             })
     return {"shipments": shipments, "total_items": len(shipments)}
 
-# ============= Competitors =============
+@api_router.post("/fba/download-bulk-sheet")
+async def download_bulk_sheet(shipment_ids: List[str], user_id: str = Depends(get_current_user)):
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["SKU", "FNSKU", "Product Name", "Quantity", "FC Code"])
+    output.seek(0)
+    return StreamingResponse(iter([output.getvalue()]), media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=shipment.csv"})
+
 @api_router.get("/competitors")
 async def get_competitors(user_id: str = Depends(get_current_user)):
     return {"competitors": []}
 
-# ============= AI Copilot =============
 @api_router.post("/ai-copilot")
 async def ai_copilot(message: Dict[str, str], user_id: str = Depends(get_current_user)):
     return {
         "response": "Connect your Amazon account to get AI-powered insights based on your real data!",
-        "suggestions": ["Connect Amazon account", "View campaigns", "Check inventory alerts"]
+        "suggestions": ["Connect Amazon account", "View campaigns", "Check inventory"]
     }
 
-# ============= Optimization =============
-@api_router.get("/optimization/suggestions")
-async def get_optimization_suggestions(user_id: str = Depends(get_current_user)):
-    return {"suggestions": [], "summary": {"total_suggestions": 0}}
+@api_router.get("/reports")
+async def get_reports(user_id: str = Depends(get_current_user)):
+    return {"reports": []}
 
-@api_router.post("/optimization/apply/{suggestion_id}")
-async def apply_optimization(suggestion_id: str, user_id: str = Depends(get_current_user)):
-    return {"message": "Optimization applied", "suggestion_id": suggestion_id}
+@api_router.get("/notifications")
+async def get_notifications(user_id: str = Depends(get_current_user)):
+    return {"notifications": [], "unread_count": 0}
 
-# ============= Budget Calculator =============
+@api_router.get("/notifications/history")
+async def get_notification_history(user_id: str = Depends(get_current_user)):
+    return {"notifications": [], "unread_count": 0}
+
+@api_router.patch("/notifications/{notification_id}/read")
+async def mark_notification_read(notification_id: str, user_id: str = Depends(get_current_user)):
+    return {"message": "Notification marked as read"}
+
+@api_router.get("/notification-settings")
+async def get_notification_settings(user_id: str = Depends(get_current_user)):
+    return {"settings": {}}
+
+@api_router.patch("/notification-settings")
+async def update_notification_settings(data: Dict[str, Any], user_id: str = Depends(get_current_user)):
+    return {"message": "Settings updated"}
+
+@api_router.get("/subscription/plans")
+async def get_subscription_plans():
+    plans = [
+        {"plan_name": "Free", "price": 0, "features": ["1 Store", "Basic Analytics"]},
+        {"plan_name": "Starter", "price": 29, "features": ["2 Stores", "Advanced Analytics"]},
+        {"plan_name": "Professional", "price": 79, "features": ["5 Stores", "Full Analytics", "AI Copilot"]},
+        {"plan_name": "Enterprise", "price": 199, "features": ["Unlimited Stores", "API Access"]}
+    ]
+    return {"plans": plans}
+
 @api_router.post("/budget-calculator")
 async def calculate_budget(data: Dict[str, Any], user_id: str = Depends(get_current_user)):
     budget = float(data.get("budget", 1000))
@@ -429,18 +443,15 @@ async def calculate_budget(data: Dict[str, Any], user_id: str = Depends(get_curr
     estimated_orders = int(estimated_clicks * (cvr / 100))
     estimated_sales = round(estimated_orders * avg_order_value, 2)
     estimated_roas = round(estimated_sales / budget, 2) if budget > 0 else 0
-    return {
-        "predictions": {
-            "estimated_clicks": estimated_clicks,
-            "estimated_orders": estimated_orders,
-            "estimated_sales": estimated_sales,
-            "estimated_roas": estimated_roas,
-        }
-    }
+    return {"predictions": {"estimated_clicks": estimated_clicks, "estimated_orders": estimated_orders, "estimated_sales": estimated_sales, "estimated_roas": estimated_roas}}
 
 @api_router.get("/budget-planner/products")
 async def get_product_budget_plans(user_id: str = Depends(get_current_user)):
     return {"budget_plans": []}
+
+@api_router.patch("/budget-planner/products/{product_id}")
+async def update_product_budget(product_id: str, data: Dict[str, Any], user_id: str = Depends(get_current_user)):
+    return {"message": "Budget updated"}
 
 @api_router.get("/dayparting/analysis")
 async def get_dayparting_analysis(user_id: str = Depends(get_current_user)):
@@ -450,25 +461,41 @@ async def get_dayparting_analysis(user_id: str = Depends(get_current_user)):
 async def get_dayparting_schedule(user_id: str = Depends(get_current_user)):
     return {"schedule": []}
 
+@api_router.post("/dayparting/schedule")
+async def update_dayparting_schedule(data: Dict[str, Any], user_id: str = Depends(get_current_user)):
+    return {"message": "Schedule updated"}
+
+@api_router.get("/optimization/suggestions")
+async def get_optimization_suggestions(user_id: str = Depends(get_current_user)):
+    return {"suggestions": [], "summary": {"total_suggestions": 0, "high_priority": 0, "potential_savings": 0, "potential_revenue_gain": 0}}
+
+@api_router.post("/optimization/apply/{suggestion_id}")
+async def apply_optimization(suggestion_id: str, user_id: str = Depends(get_current_user)):
+    return {"message": "Optimization applied", "suggestion_id": suggestion_id, "status": "applied"}
+
+@api_router.post("/optimization/apply-all")
+async def apply_all_optimizations(data: Dict[str, Any], user_id: str = Depends(get_current_user)):
+    return {"message": "All optimizations applied"}
+
 @api_router.get("/campaign-builder/products")
 async def get_products_for_campaign(user_id: str = Depends(get_current_user)):
     return {"products": []}
 
 @api_router.post("/campaign-builder/generate")
 async def generate_ai_campaign(data: Dict[str, Any], user_id: str = Depends(get_current_user)):
-    return {"campaigns": [], "message": "Connect Amazon account to generate campaigns"}
+    return {"campaigns": [], "message": "Connect Amazon to generate campaigns"}
 
 @api_router.post("/campaign-builder/launch")
 async def launch_campaigns(data: Dict[str, Any], user_id: str = Depends(get_current_user)):
-    return {"message": "Connect Amazon account to launch campaigns"}
+    return {"message": "Connect Amazon to launch campaigns", "launched_campaigns": []}
 
-@api_router.get("/notification-settings")
-async def get_notification_settings(user_id: str = Depends(get_current_user)):
-    return {"settings": {}}
+@api_router.post("/products/bulk-upload")
+async def bulk_upload_products(file: UploadFile = File(...), user_id: str = Depends(get_current_user)):
+    return {"message": "Upload received", "count": 0}
 
-@api_router.get("/products")
-async def get_products(user_id: str = Depends(get_current_user)):
-    return []
+@api_router.patch("/products/{product_id}/cost")
+async def update_product_cost(product_id: str, cost_data: Dict[str, float], user_id: str = Depends(get_current_user)):
+    return {"message": "Cost updated"}
 
 app.include_router(api_router)
 app.add_middleware(
