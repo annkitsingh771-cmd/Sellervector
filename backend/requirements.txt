@@ -3,3 +3,8 @@ uvicorn
 python-multipart
 pydantic
 python-dotenv
+motor
+passlib[bcrypt]
+python-jose[cryptography]
+faker
+email-validator
