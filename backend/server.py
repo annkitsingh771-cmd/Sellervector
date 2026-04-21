@@ -1,518 +1,585 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, UploadFile, File
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from fastapi.responses import StreamingResponse
-from dotenv import load_dotenv
-from starlette.middleware.cors import CORSMiddleware
-from motor.motor_asyncio import AsyncIOMotorClient
+"""
+AdPilot â€” Amazon PPC Campaign Manager
+=====================================
+Full backend (server.py)
+
+Fixes applied from the broken original:
+  * ends(get_current_user) -> Depends(get_current_user)
+  * Completed the truncated /c... endpoint (now /campaign-builder/create)
+  * Replaced plain-string user_id dependency with a proper User object
+  * Added the missing auth layer, DB models and schemas everything was assuming
+
+Added for the "make it a real tool" request:
+  * JWT auth (register / login / me)
+  * SQLAlchemy + SQLite persistence (swap DATABASE_URL for Postgres in prod)
+  * Stores (connect / disconnect / list / sync)   <- fixes the "Connect Store" UX
+  * Campaigns, Keywords CRUD
+  * Automation Rules with 4 condition types (>, <, =, between)  <- matches UI colors
+  * Daily Optimizations (list / toggle / apply-one / apply-all)
+  * Analytics (dashboard KPIs, top keywords)
+  * Notifications (list / mark-read / WebSocket)  <- fixes bell icon
+  * Campaign Builder (products list + AI generation via Anthropic)
+  * CORS, health check, error handlers
+"""
+
 import os
-import logging
-import requests
-import io
-import csv
-from pathlib import Path
-from pydantic import BaseModel, Field, EmailStr, ConfigDict
-from typing import List, Optional, Dict, Any
 import uuid
-from datetime import datetime, timezone, timedelta
-from passlib.context import CryptContext
-from jose import jwt, JWTError
+import logging
+from datetime import datetime, timedelta
+from typing import Any, Dict, List, Optional
+from contextlib import asynccontextmanager
 
-ROOT_DIR = Path(__file__).parent
-load_dotenv(ROOT_DIR / '.env')
+import httpx
+from fastapi import (
+    FastAPI, APIRouter, Depends, HTTPException, status,
+    WebSocket, WebSocketDisconnect, Query,
+)
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 
-mongo_url = os.environ['MONGO_URL']
-client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
+import bcrypt
+from jose import JWTError, jwt
+from pydantic import BaseModel, EmailStr, Field, field_validator
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-SECRET_KEY = os.getenv("SECRET_KEY", "sv2024secret")
+from sqlalchemy import (
+    create_engine, Column, String, Float, Integer, Boolean,
+    DateTime, Text, ForeignKey, desc,
+)
+from sqlalchemy.orm import declarative_base, sessionmaker, Session, relationship
+
+# ==============================================================
+#  CONFIG
+# ==============================================================
+SECRET_KEY = os.getenv("SECRET_KEY", "adpilot-dev-secret-change-me")
 ALGORITHM = "HS256"
-security = HTTPBearer()
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24
 
-SP_API_CLIENT_ID = os.getenv("SP_API_CLIENT_ID")
-SP_API_CLIENT_SECRET = os.getenv("SP_API_CLIENT_SECRET")
-SP_API_REFRESH_TOKEN = os.getenv("SP_API_REFRESH_TOKEN")
-AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
-AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
-MARKETPLACE_ID = "A21TJRUUN4KGV"
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./adpilot.db")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+ANTHROPIC_MODEL = "claude-sonnet-4-20250514"
+FRONTEND_ORIGINS = os.getenv("FRONTEND_ORIGINS", "*").split(",")
 
-app = FastAPI()
-api_router = APIRouter(prefix="/api")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)s  %(message)s")
+log = logging.getLogger("adpilot")
 
+# ==============================================================
+#  DATABASE
+# ==============================================================
+engine = create_engine(
+    DATABASE_URL,
+    connect_args={"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {},
+)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+# ==============================================================
+#  ORM MODELS
+# ==============================================================
+class User(Base):
+    _tablename_ = "users"
+    id              = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    email           = Column(String, unique=True, index=True, nullable=False)
+    hashed_password = Column(String, nullable=False)
+    full_name       = Column(String, default="")
+    is_active       = Column(Boolean, default=True)
+    created_at      = Column(DateTime, default=datetime.utcnow)
+    stores          = relationship("Store", back_populates="user", cascade="all, delete-orphan")
+    notifications   = relationship("Notification", back_populates="user", cascade="all, delete-orphan")
+
+
+class Store(Base):
+    _tablename_ = "stores"
+    id           = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id      = Column(String, ForeignKey("users.id"), nullable=False)
+    name         = Column(String, nullable=False)
+    marketplace  = Column(String, default="us")
+    seller_id    = Column(String, default="")
+    api_token    = Column(String, default="")
+    profile_id   = Column(String, default="")
+    is_connected = Column(Boolean, default=True)
+    connected_at = Column(DateTime, default=datetime.utcnow)
+    last_sync    = Column(DateTime, nullable=True)
+    user         = relationship("User", back_populates="stores")
+    campaigns    = relationship("Campaign", back_populates="store", cascade="all, delete-orphan")
+
+
+class Campaign(Base):
+    _tablename_ = "campaigns"
+    id            = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    store_id      = Column(String, ForeignKey("stores.id"), nullable=False)
+    name          = Column(String, nullable=False)
+    campaign_type = Column(String, default="SP")
+    status        = Column(String, default="draft")
+    daily_budget  = Column(Float, default=50.0)
+    spend         = Column(Float, default=0.0)
+    revenue       = Column(Float, default=0.0)
+    impressions   = Column(Integer, default=0)
+    clicks        = Column(Integer, default=0)
+    orders        = Column(Integer, default=0)
+    acos          = Column(Float, nullable=True)
+    roas          = Column(Float, nullable=True)
+    ctr           = Column(Float, nullable=True)
+    cvr           = Column(Float, nullable=True)
+    target_acos   = Column(Float, default=25.0)
+    asin          = Column(String, default="")
+    created_at    = Column(DateTime, default=datetime.utcnow)
+    updated_at    = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    store         = relationship("Store", back_populates="campaigns")
+    keywords      = relationship("Keyword", back_populates="campaign", cascade="all, delete-orphan")
+
+
+class Keyword(Base):
+    _tablename_ = "keywords"
+    id           = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    campaign_id  = Column(String, ForeignKey("campaigns.id"), nullable=False)
+    keyword_text = Column(String, nullable=False)
+    match_type   = Column(String, default="exact")
+    bid          = Column(Float, default=1.0)
+    status       = Column(String, default="active")
+    clicks       = Column(Integer, default=0)
+    impressions  = Column(Integer, default=0)
+    spend        = Column(Float, default=0.0)
+    orders       = Column(Integer, default=0)
+    acos         = Column(Float, nullable=True)
+    campaign     = relationship("Campaign", back_populates="keywords")
+
+
+class AutomationRule(Base):
+    _tablename_ = "automation_rules"
+    id              = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id         = Column(String, ForeignKey("users.id"), nullable=False)
+    name            = Column(String, nullable=False)
+    description     = Column(Text, default="")
+    metric          = Column(String, nullable=False)
+    condition       = Column(String, nullable=False)
+    threshold_value = Column(Float, nullable=True)
+    threshold_min   = Column(Float, nullable=True)
+    threshold_max   = Column(Float, nullable=True)
+    action          = Column(String, nullable=False)
+    action_value    = Column(Float, nullable=True)
+    lookback_days   = Column(Integer, default=7)
+    apply_to        = Column(String, default="all")
+    is_active       = Column(Boolean, default=True)
+    times_triggered = Column(Integer, default=0)
+    last_triggered  = Column(DateTime, nullable=True)
+    created_at      = Column(DateTime, default=datetime.utcnow)
+
+
+class DailyOptimization(Base):
+    _tablename_ = "daily_optimizations"
+    id           = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id      = Column(String, ForeignKey("users.id"), nullable=False)
+    campaign_id  = Column(String, ForeignKey("campaigns.id"), nullable=True)
+    keyword_id   = Column(String, ForeignKey("keywords.id"), nullable=True)
+    title        = Column(String, nullable=False)
+    description  = Column(Text, default="")
+    action       = Column(String, nullable=False)
+    action_value = Column(Float, nullable=True)
+    status       = Column(String, default="pending")
+    rule_id      = Column(String, nullable=True)
+    created_at   = Column(DateTime, default=datetime.utcnow)
+    applied_at   = Column(DateTime, nullable=True)
+
+
+class Notification(Base):
+    _tablename_ = "notifications"
+    id         = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id    = Column(String, ForeignKey("users.id"), nullable=False)
+    title      = Column(String, nullable=False)
+    message    = Column(Text, nullable=False)
+    severity   = Column(String, default="info")
+    is_read    = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    user       = relationship("User", back_populates="notifications")
+
+
+Base.metadata.create_all(bind=engine)
+
+
+# ==============================================================
+#  AUTH
+# ==============================================================
+pwd_max_bytes = 72  # bcrypt hard limit
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/token")
+
+
+def hash_password(pw: str) -> str:
+    pw_bytes = pw.encode("utf-8")[:pwd_max_bytes]
+    return bcrypt.hashpw(pw_bytes, bcrypt.gensalt()).decode("utf-8")
+
+
+def verify_password(plain: str, hashed: str) -> bool:
+    plain_bytes = plain.encode("utf-8")[:pwd_max_bytes]
+    try:
+        return bcrypt.checkpw(plain_bytes, hashed.encode("utf-8"))
+    except ValueError:
+        return False
+
+
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
+    to_encode = data.copy()
+    to_encode["exp"] = datetime.utcnow() + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> User:
+    """The fragment had ends(get_current_user) -- that was the bug. This is the real dependency."""
+    exc = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        user_id = payload.get("sub")
+        if not user_id:
+            raise exc
+    except JWTError:
+        raise exc
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user or not user.is_active:
+        raise exc
+    return user
+
+
+# ==============================================================
+#  PYDANTIC SCHEMAS
+# ==============================================================
 class UserRegister(BaseModel):
     email: EmailStr
-    password: str
-    full_name: str
+    password: str = Field(min_length=6)
+    full_name: Optional[str] = ""
 
-class UserLogin(BaseModel):
-    email: EmailStr
-    password: str
 
-class TokenResponse(BaseModel):
-    token: str
-    user: Dict[str, Any]
-
-class User(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+class UserOut(BaseModel):
+    id: str
     email: str
     full_name: str
-    subscription_plan: str = "free"
-    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    is_active: bool
+    created_at: datetime
+    class Config:
+        from_attributes = True
 
-class Store(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    user_id: str
+
+class TokenOut(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: UserOut
+
+
+class StoreCreate(BaseModel):
+    name: str
+    marketplace: str = "us"
+    seller_id: Optional[str] = ""
+    api_token: Optional[str] = ""
+    profile_id: Optional[str] = ""
+
+
+class StoreOut(BaseModel):
+    id: str
+    name: str
     marketplace: str
-    store_name: str
     seller_id: str
-    connected_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
-    status: str = "active"
+    profile_id: str
+    is_connected: bool
+    connected_at: datetime
+    last_sync: Optional[datetime]
+    class Config:
+        from_attributes = True
 
-def hash_password(password: str) -> str:
-    return pwd_context.hash(password)
 
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    return pwd_context.verify(plain_password, hashed_password)
+class CampaignCreate(BaseModel):
+    store_id: str
+    name: str
+    campaign_type: str = "SP"
+    daily_budget: float = 50.0
+    target_acos: float = 25.0
+    asin: Optional[str] = ""
 
-def create_token(user_id: str) -> str:
-    expiration = datetime.now(timezone.utc) + timedelta(days=30)
-    return jwt.encode({"user_id": user_id, "exp": expiration}, SECRET_KEY, algorithm=ALGORITHM)
 
-async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
-    try:
-        token = credentials.credentials
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        user_id = payload.get("user_id")
-        if not user_id:
-            raise HTTPException(status_code=401, detail="Invalid token")
-        return user_id
-    except JWTError:
-        raise HTTPException(status_code=401, detail="Invalid token")
+class CampaignUpdate(BaseModel):
+    name: Optional[str] = None
+    status: Optional[str] = None
+    daily_budget: Optional[float] = None
+    target_acos: Optional[float] = None
 
-def get_access_token(refresh_token: str = None):
-    token = refresh_token or SP_API_REFRESH_TOKEN
-    try:
-        response = requests.post(
-            "https://api.amazon.com/auth/o2/token",
-            data={
-                "grant_type": "refresh_token",
-                "refresh_token": token,
-                "client_id": SP_API_CLIENT_ID,
-                "client_secret": SP_API_CLIENT_SECRET,
-            }
-        )
-        return response.json().get("access_token")
-    except Exception as e:
-        logging.error(f"Error getting access token: {e}")
-        return None
 
-def get_amazon_orders(refresh_token: str = None, days: int = 30):
-    try:
-        access_token = get_access_token(refresh_token)
-        if not access_token:
-            return []
-        created_after = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        response = requests.get(
-            "https://sellingpartnerapi-eu.amazon.com/orders/v0/orders",
-            headers={
-                "x-amz-access-token": access_token,
-                "x-amz-date": datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"),
-            },
-            params={
-                "MarketplaceIds": MARKETPLACE_ID,
-                "CreatedAfter": created_after,
-                "OrderStatuses": "Shipped,Delivered,Unshipped"
-            }
-        )
-        return response.json().get("payload", {}).get("Orders", [])
-    except Exception as e:
-        logging.error(f"Error fetching orders: {e}")
-        return []
+class CampaignOut(BaseModel):
+    id: str
+    store_id: str
+    name: str
+    campaign_type: str
+    status: str
+    daily_budget: float
+    spend: float
+    revenue: float
+    impressions: int
+    clicks: int
+    orders: int
+    acos: Optional[float]
+    roas: Optional[float]
+    ctr: Optional[float]
+    cvr: Optional[float]
+    target_acos: float
+    asin: str
+    created_at: datetime
+    class Config:
+        from_attributes = True
 
-def get_amazon_inventory(refresh_token: str = None):
-    try:
-        access_token = get_access_token(refresh_token)
-        if not access_token:
-            return []
-        response = requests.get(
-            "https://sellingpartnerapi-eu.amazon.com/fba/inventory/v1/summaries",
-            headers={
-                "x-amz-access-token": access_token,
-                "x-amz-date": datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"),
-            },
-            params={
-                "details": True,
-                "marketplaceIds": MARKETPLACE_ID,
-                "granularityType": "Marketplace",
-                "granularityId": MARKETPLACE_ID
-            }
-        )
-        return response.json().get("payload", {}).get("inventorySummaries", [])
-    except Exception as e:
-        logging.error(f"Error fetching inventory: {e}")
-        return []
 
-def get_advertising_campaigns(refresh_token: str = None):
-    try:
-        access_token = get_access_token(refresh_token)
-        if not access_token:
-            return []
-        response = requests.get(
-            "https://sellingpartnerapi-eu.amazon.com/sp/campaigns",
-            headers={
-                "Amazon-Advertising-API-ClientId": SP_API_CLIENT_ID,
-                "Authorization": f"Bearer {access_token}",
-                "Amazon-Advertising-API-Scope": MARKETPLACE_ID,
-            }
-        )
-        return response.json() if response.status_code == 200 else []
-    except Exception as e:
-        logging.error(f"Error fetching campaigns: {e}")
-        return []
+class KeywordCreate(BaseModel):
+    campaign_id: str
+    keyword_text: str
+    match_type: str = "exact"
+    bid: float = 1.0
 
-def get_advertising_keywords(refresh_token: str = None):
-    try:
-        access_token = get_access_token(refresh_token)
-        if not access_token:
-            return []
-        response = requests.get(
-            "https://sellingpartnerapi-eu.amazon.com/sp/keywords",
-            headers={
-                "Amazon-Advertising-API-ClientId": SP_API_CLIENT_ID,
-                "Authorization": f"Bearer {access_token}",
-                "Amazon-Advertising-API-Scope": MARKETPLACE_ID,
-            }
-        )
-        return response.json() if response.status_code == 200 else []
-    except Exception as e:
-        logging.error(f"Error fetching keywords: {e}")
-        return []
 
-@api_router.get("/")
-async def root():
-    return {"message": "SellerVector API", "status": "running"}
+class KeywordUpdate(BaseModel):
+    bid: Optional[float] = None
+    status: Optional[str] = None
 
-@api_router.post("/auth/register", response_model=TokenResponse)
-async def register(user_data: UserRegister):
-    existing = await db.users.find_one({"email": user_data.email}, {"_id": 0})
-    if existing:
-        raise HTTPException(status_code=400, detail="Email already registered")
-    user = User(email=user_data.email, full_name=user_data.full_name)
-    user_dict = user.model_dump()
-    user_dict["password_hash"] = hash_password(user_data.password)
-    await db.users.insert_one(user_dict)
-    token = create_token(user.id)
-    return TokenResponse(
-        token=token,
-        user={"id": user.id, "email": user.email, "full_name": user.full_name, "subscription_plan": user.subscription_plan}
-    )
 
-@api_router.post("/auth/login", response_model=TokenResponse)
-async def login(credentials: UserLogin):
-    user = await db.users.find_one({"email": credentials.email}, {"_id": 0})
-    if not user or not verify_password(credentials.password, user["password_hash"]):
-        raise HTTPException(status_code=401, detail="Invalid email or password")
-    token = create_token(user["id"])
-    return TokenResponse(
-        token=token,
-        user={"id": user["id"], "email": user["email"], "full_name": user["full_name"], "subscription_plan": user.get("subscription_plan", "free")}
-    )
+class KeywordOut(BaseModel):
+    id: str
+    campaign_id: str
+    keyword_text: str
+    match_type: str
+    bid: float
+    status: str
+    clicks: int
+    impressions: int
+    spend: float
+    orders: int
+    acos: Optional[float]
+    class Config:
+        from_attributes = True
 
-@api_router.post("/stores")
-async def connect_store(store_data: Dict[str, Any], user_id: str = Depends(get_current_user)):
-    store = Store(
-        user_id=user_id,
-        marketplace=store_data["marketplace"],
-        store_name=store_data["store_name"],
-        seller_id=store_data["seller_id"]
-    )
-    await db.stores.insert_one(store.model_dump())
-    return store
 
-@api_router.get("/stores")
-async def get_stores(user_id: str = Depends(get_current_user)):
-    stores = await db.stores.find({"user_id": user_id}, {"_id": 0}).to_list(100)
-    return stores
+VALID_CONDITIONS = {"greater_than", "less_than", "equals", "between"}
+VALID_METRICS    = {"acos", "roas", "clicks", "impressions", "spend", "orders", "ctr", "cvr"}
+VALID_ACTIONS    = {"bid_up", "bid_down", "pause", "enable", "negate", "budget_up", "budget_down", "flag"}
 
-@api_router.get("/amazon/connect")
-async def amazon_connect(user_id: str = Depends(get_current_user)):
-    auth_url = (
-        f"https://sellercentral.amazon.in/apps/authorize/consent"
-        f"?application_id={SP_API_CLIENT_ID}"
-        f"&state={user_id}"
-        f"&version=beta"
-    )
-    return {"auth_url": auth_url}
 
-@api_router.get("/amazon/callback")
-async def amazon_callback(spapi_oauth_code: str, state: str):
-    try:
-        response = requests.post(
-            "https://api.amazon.com/auth/o2/token",
-            data={
-                "grant_type": "authorization_code",
-                "code": spapi_oauth_code,
-                "client_id": SP_API_CLIENT_ID,
-                "client_secret": SP_API_CLIENT_SECRET,
-            }
-        )
-        tokens = response.json()
-        refresh_token = tokens.get("refresh_token")
-        await db.users.update_one(
-            {"id": state},
-            {"$set": {"amazon_refresh_token": refresh_token, "amazon_connected": True}}
-        )
-        return {"status": "connected", "message": "Amazon account connected successfully!"}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+class RuleCreate(BaseModel):
+    name: str
+    description: Optional[str] = ""
+    metric: str
+    condition: str
+    threshold_value: Optional[float] = None
+    threshold_min: Optional[float] = None
+    threshold_max: Optional[float] = None
+    action: str
+    action_value: Optional[float] = None
+    lookback_days: int = 7
+    apply_to: str = "all"
 
-@api_router.get("/dashboard")
-async def get_dashboard(days: int = 30, user_id: str = Depends(get_current_user)):
-    user = await db.users.find_one({"id": user_id}, {"_id": 0})
-    refresh_token = user.get("amazon_refresh_token") if user else None
-    orders = get_amazon_orders(refresh_token, days)
-    inventory = get_amazon_inventory(refresh_token)
-    total_orders = len(orders)
-    total_revenue = sum(float(o.get("OrderTotal", {}).get("Amount", 0)) for o in orders if o.get("OrderTotal"))
-    low_inventory = [i for i in inventory if i.get("totalQuantity", 0) < 50]
-    return {
-        "total_orders": total_orders,
-        "total_revenue": round(total_revenue, 2),
-        "low_inventory_alerts": len(low_inventory),
-        "currency": "INR",
-        "amazon_connected": bool(refresh_token),
-        "top_products": [],
-        "orders_chart": [],
-        "revenue_chart": [],
-        "sales_by_marketplace": [],
-        "tcos": 0,
-        "roas": 0,
-        "acos": 0,
-        "ad_spend": 0,
-        "net_profit": 0
-    }
+    @field_validator("condition")
+    @classmethod
+    def _cond(cls, v):
+        if v not in VALID_CONDITIONS:
+            raise ValueError(f"condition must be one of {VALID_CONDITIONS}")
+        return v
 
-@api_router.get("/orders")
-async def get_orders(days: int = 30, user_id: str = Depends(get_current_user)):
-    user = await db.users.find_one({"id": user_id}, {"_id": 0})
-    refresh_token = user.get("amazon_refresh_token") if user else None
-    orders = get_amazon_orders(refresh_token, days)
-    return {"orders": orders, "total": len(orders)}
+    @field_validator("metric")
+    @classmethod
+    def _metric(cls, v):
+        if v not in VALID_METRICS:
+            raise ValueError(f"metric must be one of {VALID_METRICS}")
+        return v
 
-@api_router.get("/products")
-async def get_products(user_id: str = Depends(get_current_user)):
-    return []
+    @field_validator("action")
+    @classmethod
+    def _action(cls, v):
+        if v not in VALID_ACTIONS:
+            raise ValueError(f"action must be one of {VALID_ACTIONS}")
+        return v
 
-@api_router.get("/inventory/alerts")
-async def get_inventory_alerts(user_id: str = Depends(get_current_user)):
-    user = await db.users.find_one({"id": user_id}, {"_id": 0})
-    refresh_token = user.get("amazon_refresh_token") if user else None
-    inventory = get_amazon_inventory(refresh_token)
-    alerts = []
-    for item in inventory:
-        qty = item.get("totalQuantity", 0)
-        if qty < 50:
-            alerts.append({
-                "id": str(uuid.uuid4()),
-                "product_name": item.get("productName", "Unknown"),
-                "sku": item.get("sellerSku", ""),
-                "asin": item.get("asin", ""),
-                "current_stock": qty,
-                "alert_level": "critical" if qty < 10 else "warning",
-                "days_until_stockout": 0,
-                "daily_sales_velocity": 0,
-                "marketplace": "Amazon India"
-            })
-    return {"alerts": alerts}
 
-@api_router.get("/inventory/ledger")
-async def get_inventory_ledger(user_id: str = Depends(get_current_user)):
-    return {"ledger": []}
+class RuleUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    is_active: Optional[bool] = None
+    threshold_value: Optional[float] = None
+    threshold_min: Optional[float] = None
+    threshold_max: Optional[float] = None
+    action_value: Optional[float] = None
 
-@api_router.get("/campaigns")
-async def get_campaigns(user_id: str = Depends(get_current_user)):
-    user = await db.users.find_one({"id": user_id}, {"_id": 0})
-    refresh_token = user.get("amazon_refresh_token") if user else None
-    campaigns = get_advertising_campaigns(refresh_token)
-    return {"campaigns": campaigns}
 
-@api_router.get("/campaigns/wasted-spend")
-async def get_wasted_spend(user_id: str = Depends(get_current_user)):
-    user = await db.users.find_one({"id": user_id}, {"_id": 0})
-    refresh_token = user.get("amazon_refresh_token") if user else None
-    keywords = get_advertising_keywords(refresh_token)
-    wasted = [k for k in keywords if k.get("sales", 0) == 0 and k.get("spend", 0) > 0]
-    return {"wasted_keywords": wasted, "total_wasted": sum(k.get("spend", 0) for k in wasted)}
+class RuleOut(BaseModel):
+    id: str
+    name: str
+    description: str
+    metric: str
+    condition: str
+    threshold_value: Optional[float]
+    threshold_min: Optional[float]
+    threshold_max: Optional[float]
+    action: str
+    action_value: Optional[float]
+    lookback_days: int
+    apply_to: str
+    is_active: bool
+    times_triggered: int
+    last_triggered: Optional[datetime]
+    created_at: datetime
+    class Config:
+        from_attributes = True
 
-@api_router.get("/campaigns/{campaign_id}/keywords")
-async def get_keywords(campaign_id: str, user_id: str = Depends(get_current_user)):
-    return {"keywords": []}
 
-@api_router.post("/campaigns/create")
-async def create_campaign(campaign_data: Dict[str, Any], user_id: str = Depends(get_current_user)):
-    return {"campaigns": [], "message": "Connect Amazon account to create campaigns"}
+class OptimizationOut(BaseModel):
+    id: str
+    campaign_id: Optional[str]
+    keyword_id: Optional[str]
+    title: str
+    description: str
+    action: str
+    action_value: Optional[float]
+    status: str
+    created_at: datetime
+    class Config:
+        from_attributes = True
 
-@api_router.get("/profit/calculate")
-async def calculate_profit(user_id: str = Depends(get_current_user)):
-    return {"profit_data": []}
 
-@api_router.get("/fba/shipment-planner")
-async def get_fba_shipment_planner(user_id: str = Depends(get_current_user)):
-    user = await db.users.find_one({"id": user_id}, {"_id": 0})
-    refresh_token = user.get("amazon_refresh_token") if user else None
-    inventory = get_amazon_inventory(refresh_token)
-    shipments = []
-    for item in inventory:
-        qty = item.get("totalQuantity", 0)
-        if qty < 100:
-            shipments.append({
-                "id": str(uuid.uuid4()),
-                "sku": item.get("sellerSku", ""),
-                "asin": item.get("asin", ""),
-                "title": item.get("productName", ""),
-                "current_stock": qty,
-                "quantity_needed": 200 - qty,
-                "fc_code": "BOM7",
-                "priority": "high" if qty < 50 else "medium"
-            })
-    return {"shipments": shipments, "total_items": len(shipments)}
+class NotificationOut(BaseModel):
+    id: str
+    title: str
+    message: str
+    severity: str
+    is_read: bool
+    created_at: datetime
+    class Config:
+        from_attributes = True
 
-@api_router.post("/fba/download-bulk-sheet")
-async def download_bulk_sheet(shipment_ids: List[str], user_id: str = Depends(get_current_user)):
-    output = io.StringIO()
-    writer = csv.writer(output)
-    writer.writerow(["SKU", "FNSKU", "Product Name", "Quantity", "FC Code"])
-    output.seek(0)
-    return StreamingResponse(iter([output.getvalue()]), media_type="text/csv",
-        headers={"Content-Disposition": "attachment; filename=shipment.csv"})
 
-@api_router.get("/competitors")
-async def get_competitors(user_id: str = Depends(get_current_user)):
-    return {"competitors": []}
+class AnalyticsOut(BaseModel):
+    total_spend: float
+    total_revenue: float
+    avg_acos: Optional[float]
+    active_campaigns: int
+    paused_campaigns: int
+    draft_campaigns: int
+    total_impressions: int
+    total_clicks: int
+    total_orders: int
+    avg_ctr: Optional[float]
+    avg_cvr: Optional[float]
+    roas: Optional[float]
 
-@api_router.post("/ai-copilot")
-async def ai_copilot(message: Dict[str, str], user_id: str = Depends(get_current_user)):
-    return {
-        "response": "Connect your Amazon account to get AI-powered insights based on your real data!",
-        "suggestions": ["Connect Amazon account", "View campaigns", "Check inventory"]
-    }
 
-@api_router.get("/reports")
-async def get_reports(user_id: str = Depends(get_current_user)):
-    return {"reports": []}
+# ==============================================================
+#  WEBSOCKET NOTIFICATION HUB  (fixes the hard-coded "5" badge)
+# ==============================================================
+class NotificationHub:
+    def _init_(self):
+        self.active: Dict[str, List[WebSocket]] = {}
 
-@api_router.get("/notifications")
-async def get_notifications(user_id: str = Depends(get_current_user)):
-    return {"notifications": [], "unread_count": 0}
+    async def connect(self, user_id: str, ws: WebSocket):
+        await ws.accept()
+        self.active.setdefault(user_id, []).append(ws)
 
-@api_router.get("/notifications/history")
-async def get_notification_history(user_id: str = Depends(get_current_user)):
-    return {"notifications": [], "unread_count": 0}
+    def disconnect(self, user_id: str, ws: WebSocket):
+        if user_id in self.active:
+            self.active[user_id] = [w for w in self.active[user_id] if w is not ws]
+            if not self.active[user_id]:
+                del self.active[user_id]
 
-@api_router.patch("/notifications/{notification_id}/read")
-async def mark_notification_read(notification_id: str, user_id: str = Depends(get_current_user)):
-    return {"message": "Notification marked as read"}
+    async def push(self, user_id: str, payload: dict):
+        for ws in list(self.active.get(user_id, [])):
+            try:
+                await ws.send_json(payload)
+            except Exception:
+                self.disconnect(user_id, ws)
 
-@api_router.get("/notification-settings")
-async def get_notification_settings(user_id: str = Depends(get_current_user)):
-    return {"settings": {}}
 
-@api_router.patch("/notification-settings")
-async def update_notification_settings(data: Dict[str, Any], user_id: str = Depends(get_current_user)):
-    return {"message": "Settings updated"}
+hub = NotificationHub()
 
-@api_router.get("/subscription/plans")
-async def get_subscription_plans():
-    plans = [
-        {"plan_name": "Free", "price": 0, "features": ["1 Store", "Basic Analytics"]},
-        {"plan_name": "Starter", "price": 29, "features": ["2 Stores", "Advanced Analytics"]},
-        {"plan_name": "Professional", "price": 79, "features": ["5 Stores", "Full Analytics", "AI Copilot"]},
-        {"plan_name": "Enterprise", "price": 199, "features": ["Unlimited Stores", "API Access"]}
-    ]
-    return {"plans": plans}
 
-@api_router.post("/budget-calculator")
-async def calculate_budget(data: Dict[str, Any], user_id: str = Depends(get_current_user)):
-    budget = float(data.get("budget", 1000))
-    cpc = float(data.get("cpc", 0.50))
-    cvr = float(data.get("cvr", 10))
-    avg_order_value = float(data.get("avg_order_value", 50))
-    estimated_clicks = int(budget / cpc) if cpc > 0 else 0
-    estimated_orders = int(estimated_clicks * (cvr / 100))
-    estimated_sales = round(estimated_orders * avg_order_value, 2)
-    estimated_roas = round(estimated_sales / budget, 2) if budget > 0 else 0
-    return {"predictions": {"estimated_clicks": estimated_clicks, "estimated_orders": estimated_orders, "estimated_sales": estimated_sales, "estimated_roas": estimated_roas}}
+async def create_notification(
+    db: Session, user_id: str, title: str, message: str, severity: str = "info"
+):
+    n = Notification(user_id=user_id, title=title, message=message, severity=severity)
+    db.add(n)
+    db.commit()
+    db.refresh(n)
+    await hub.push(user_id, {
+        "type": "notification",
+        "id": n.id,
+        "title": n.title,
+        "message": n.message,
+        "severity": n.severity,
+        "created_at": n.created_at.isoformat(),
+    })
+    return n
 
-@api_router.get("/budget-planner/products")
-async def get_product_budget_plans(user_id: str = Depends(get_current_user)):
-    return {"budget_plans": []}
 
-@api_router.patch("/budget-planner/products/{product_id}")
-async def update_product_budget(product_id: str, data: Dict[str, Any], user_id: str = Depends(get_current_user)):
-    return {"message": "Budget updated"}
+# ==============================================================
+#  RULE ENGINE  (color-coded conditions match the UI)
+# ==============================================================
+def _metric_value(obj, metric: str) -> Optional[float]:
+    return getattr(obj, metric, None)
 
-@api_router.get("/dayparting/analysis")
-async def get_dayparting_analysis(user_id: str = Depends(get_current_user)):
-    return {"hourly_data": [], "daily_data": [], "recommendations": []}
 
-@api_router.get("/dayparting/schedule")
-async def get_dayparting_schedule(user_id: str = Depends(get_current_user)):
-    return {"schedule": []}
+def _condition_passes(rule: AutomationRule, value: Optional[float]) -> bool:
+    if value is None:
+        return False
+    c = rule.condition
+    if c == "greater_than" and rule.threshold_value is not None:
+        return value > rule.threshold_value
+    if c == "less_than" and rule.threshold_value is not None:
+        return value < rule.threshold_value
+    if c == "equals" and rule.threshold_value is not None:
+        return abs(value - rule.threshold_value) < 1e-6
+    if c == "between" and rule.threshold_min is not None and rule.threshold_max is not None:
+        return rule.threshold_min <= value <= rule.threshold_max
+    return False
 
-@api_router.post("/dayparting/schedule")
-async def update_dayparting_schedule(data: Dict[str, Any], user_id: str = Depends(get_current_user)):
-    return {"message": "Schedule updated"}
 
-@api_router.get("/optimization/suggestions")
-async def get_optimization_suggestions(user_id: str = Depends(get_current_user)):
-    return {"suggestions": [], "summary": {"total_suggestions": 0, "high_priority": 0, "potential_savings": 0, "potential_revenue_gain": 0}}
+async def run_rules_for_user(db: Session, user: User) -> List[DailyOptimization]:
+    """Evaluate all active rules against campaigns + keywords, queue optimizations."""
+    rules = db.query(AutomationRule).filter(
+        AutomationRule.user_id == user.id, AutomationRule.is_active == True
+    ).all()
+    store_ids = [s.id for s in user.stores]
+    campaigns = db.query(Campaign).filter(Campaign.store_id.in_(store_ids)).all()
+    created: List[DailyOptimization] = []
 
-@api_router.post("/optimization/apply/{suggestion_id}")
-async def apply_optimization(suggestion_id: str, user_id: str = Depends(get_current_user)):
-    return {"message": "Optimization applied", "suggestion_id": suggestion_id, "status": "applied"}
+    for rule in rules:
+        targets = campaigns
+        if rule.apply_to in ("SP", "SB", "SD"):
+            targets = [c for c in campaigns if c.campaign_type == rule.apply_to]
 
-@api_router.post("/optimization/apply-all")
-async def apply_all_optimizations(data: Dict[str, Any], user_id: str = Depends(get_current_user)):
-    return {"message": "All optimizations applied"}
+        for camp in targets:
+            val = _metric_value(camp, rule.metric)
+            if _condition_passes(rule, val):
+                opt = DailyOptimization(
+                    user_id=user.id, campaign_id=camp.id,
+                    title=f"{camp.name}",
+                    description=f"{rule.name}: {rule.metric}={val} triggered rule",
+                    action=rule.action, action_value=rule.action_value, rule_id=rule.id,
+                )
+                db.add(opt); created.append(opt)
+                rule.times_triggered += 1
+                rule.last_triggered = datetime.utcnow()
 
-@api_router.get("/campaign-builder/products")
-async def get_products_for_campaign(user_id: str = Depends(get_current_user)):
-    return {"products": []}
-
-@api_router.post("/campaign-builder/generate")
-async def generate_ai_campaign(data: Dict[str, Any], user_id: str = Depends(get_current_user)):
-    return {"campaigns": [], "message": "Connect Amazon to generate campaigns"}
-
-@api_router.post("/campaign-builder/launch")
-async def launch_campaigns(data: Dict[str, Any], user_id: str = Depends(get_current_user)):
-    return {"message": "Connect Amazon to launch campaigns", "launched_campaigns": []}
-
-@api_router.post("/products/bulk-upload")
-async def bulk_upload_products(file: UploadFile = File(...), user_id: str = Depends(get_current_user)):
-    return {"message": "Upload received", "count": 0}
-
-@api_router.patch("/products/{product_id}/cost")
-async def update_product_cost(product_id: str, cost_data: Dict[str, float], user_id: str = Depends(get_current_user)):
-    return {"message": "Cost updated"}
-
-app.include_router(api_router)
-app.add_middleware(
-    CORSMiddleware,
-    allow_credentials=True,
-    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-@app.on_event("startup")
-async def startup_event():
-    logger.info("SellerVector API started!")
-
-@app.on_event("shutdown")
-async def shutdown_db_client():
-    client.close()
+            for kw in camp.keywords:
+                kval = _metric_value(kw, rule.metric)
+                if _condition_passes(rule, kval):
+                    opt = DailyOptimization(
+                        user_id=user.id, campaign_id=camp.id, keyword_id=kw.id,
+                        title=f"{camp.name} -- [{kw.keyword_text}]",
+                        description=f"{rule.name}: {rule.metric}={kval} triggered rule",
+                        action=rule.action, action_value=rule.action_value, rule_id=rule.id,
+                    )
+                    db.add(opt); created.append(opt)
+                    rule.times_triggered += 1
+                    rule.last_triggered = datetime.utcno
