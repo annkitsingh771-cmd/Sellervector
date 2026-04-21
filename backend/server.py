@@ -115,7 +115,7 @@ def get_amazon_orders(refresh_token: str = None, days: int = 30):
             return []
         created_after = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
         response = requests.get(
-            "https://sellingpartnerapi-fe.amazon.com/orders/v0/orders",
+            "https://sellingpartnerapi-eu.amazon.com/orders/v0/orders",
             headers={
                 "x-amz-access-token": access_token,
                 "x-amz-date": datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"),
@@ -137,7 +137,7 @@ def get_amazon_inventory(refresh_token: str = None):
         if not access_token:
             return []
         response = requests.get(
-            "https://sellingpartnerapi-fe.amazon.com/fba/inventory/v1/summaries",
+            "https://sellingpartnerapi-eu.amazon.com/fba/inventory/v1/summaries",
             headers={
                 "x-amz-access-token": access_token,
                 "x-amz-date": datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"),
