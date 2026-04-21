@@ -160,7 +160,7 @@ def get_advertising_campaigns(refresh_token: str = None):
         if not access_token:
             return []
         response = requests.get(
-            "https://advertising-api-fe.amazon.com/sp/campaigns",
+            "https://sellingpartnerapi-eu.amazon.com/sp/campaigns",
             headers={
                 "Amazon-Advertising-API-ClientId": SP_API_CLIENT_ID,
                 "Authorization": f"Bearer {access_token}",
@@ -178,7 +178,7 @@ def get_advertising_keywords(refresh_token: str = None):
         if not access_token:
             return []
         response = requests.get(
-            "https://advertising-api-fe.amazon.com/sp/keywords",
+            "https://sellingpartnerapi-eu.amazon.com/sp/keywords",
             headers={
                 "Amazon-Advertising-API-ClientId": SP_API_CLIENT_ID,
                 "Authorization": f"Bearer {access_token}",
