@@ -1,0 +1,28 @@
+<svg width="680" height="180" viewBox="0 0 680 180" xmlns="http://www.w3.org/2000/svg">
+
+  <!-- No background - transparent -->
+
+  <!-- Icon rounded square -->
+  <rect x="40" y="24" width="130" height="130" rx="24" fill="#2B6BE6"/>
+
+  <!-- Bars -->
+  <rect x="66" y="108" width="22" height="30" rx="4" fill="white" opacity="0.45"/>
+  <rect x="95" y="88" width="22" height="50" rx="4" fill="white" opacity="0.68"/>
+  <rect x="124" y="64" width="22" height="74" rx="4" fill="white"/>
+
+  <!-- Arrow -->
+  <line x1="96" y1="82" x2="148" y2="56" stroke="white" stroke-width="5" stroke-linecap="round" fill="none"/>
+  <polyline points="124,50 152,50 152,76" fill="none" stroke="white" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Wordmark combined -->
+  <text x="192" y="95" font-family="Arial, sans-serif" font-size="46">
+    <tspan font-weight="400" fill="#FFFFFF">Seller</tspan><tspan font-weight="700" fill="#38BDF8">Vector</tspan>
+  </text>
+
+  <!-- Underline -->
+  <line x1="192" y1="105" x2="530" y2="105" stroke="rgba(255,255,255,0.15)" stroke-width="1.2" fill="none"/>
+
+  <!-- Tagline -->
+  <text x="192" y="134" font-family="Arial, sans-serif" font-weight="400" font-size="13" fill="#38BDF8" letter-spacing="4">OPTIMISE · SCALE · DOMINATE</text>
+
+</svg>
