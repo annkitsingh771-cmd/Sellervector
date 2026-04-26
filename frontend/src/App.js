@@ -25,26 +25,41 @@ import '@/App.css';
 
 function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [user, setUser] = useState(null);
-  const [ready, setReady] = useState(false);  // ← prevents flash before auth check
+  const [user,            setUser]            = useState(null);
+  const [ready,           setReady]           = useState(false);
 
   useEffect(() => {
-    const token    = localStorage.getItem('token');
-    const userData = localStorage.getItem('user');
-    if (token && userData) {
-      try {
+    try {
+      const token    = localStorage.getItem('token');
+      const userData = localStorage.getItem('user');
+
+      // make sure token is a real JWT — not "undefined" or "null"
+      const validToken = token && token !== 'undefined' && token !== 'null' && token.length > 20;
+      const validUser  = userData && userData !== 'undefined' && userData !== 'null';
+
+      if (validToken && validUser) {
         setIsAuthenticated(true);
         setUser(JSON.parse(userData));
-      } catch {
-        // corrupted storage — clear it
+      } else {
+        // clear any bad data
         localStorage.removeItem('token');
         localStorage.removeItem('user');
+        setIsAuthenticated(false);
       }
+    } catch (e) {
+      localStorage.removeItem('token');
+      localStorage.removeItem('user');
+      setIsAuthenticated(false);
     }
     setReady(true);
   }, []);
 
   const handleLogin = (token, userData) => {
+    // safety check — don't save bad data
+    if (!token || token === 'undefined' || !userData) {
+      console.error('handleLogin called with invalid data', { token, userData });
+      return;
+    }
     localStorage.setItem('token', token);
     localStorage.setItem('user', JSON.stringify(userData));
     setIsAuthenticated(true);
@@ -52,15 +67,18 @@ function App() {
   };
 
   const handleLogout = () => {
-    localStorage.removeItem('token');
-    localStorage.removeItem('user');
-    localStorage.removeItem('activeStoreId');   // ← clear store selection on logout
+    localStorage.clear();
     setIsAuthenticated(false);
     setUser(null);
   };
 
-  // Don't render routes until we've checked localStorage — prevents blank flash
-  if (!ready) return null;
+  if (!ready) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-50">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-600" />
+      </div>
+    );
+  }
 
   return (
     <>
@@ -72,33 +90,27 @@ function App() {
           />
           <Route
             path="/"
-            element={
-              isAuthenticated
-                ? <Layout user={user} onLogout={handleLogout} />
-                : <Navigate to="/login" replace />
-            }
+            element={isAuthenticated ? <Layout user={user} onLogout={handleLogout} /> : <Navigate to="/login" replace />}
           >
-            {/* key on Outlet is set via Layout using location.pathname, preventing blank pages */}
-            <Route index                        element={<Dashboard />} />
-            <Route path="orders"                element={<Orders />} />
-            <Route path="advertising"           element={<Advertising />} />
-            <Route path="campaigns"             element={<Campaigns />} />
-            <Route path="campaign-builder"      element={<CampaignBuilder />} />
-            <Route path="keyword-report"        element={<KeywordReport />} />
-            <Route path="optimization"          element={<Optimization />} />
-            <Route path="budget-calculator"     element={<BudgetCalculator />} />
-            <Route path="day-parting"           element={<DayParting />} />
-            <Route path="profit"                element={<Profit />} />
-            <Route path="inventory"             element={<Inventory />} />
-            <Route path="products"              element={<Products />} />
-            <Route path="competitors"           element={<Competitors />} />
-            <Route path="reports"               element={<Reports />} />
-            <Route path="fba-shipments"         element={<FBAShipmentPlanner />} />
-            <Route path="notifications"         element={<NotificationCenter />} />
-            <Route path="subscription"          element={<Subscription />} />
-            <Route path="settings"              element={<Settings />} />
+            <Route index                    element={<Dashboard />} />
+            <Route path="orders"            element={<Orders />} />
+            <Route path="advertising"       element={<Advertising />} />
+            <Route path="campaigns"         element={<Campaigns />} />
+            <Route path="campaign-builder"  element={<CampaignBuilder />} />
+            <Route path="keyword-report"    element={<KeywordReport />} />
+            <Route path="optimization"      element={<Optimization />} />
+            <Route path="budget-calculator" element={<BudgetCalculator />} />
+            <Route path="day-parting"       element={<DayParting />} />
+            <Route path="profit"            element={<Profit />} />
+            <Route path="inventory"         element={<Inventory />} />
+            <Route path="products"          element={<Products />} />
+            <Route path="competitors"       element={<Competitors />} />
+            <Route path="reports"           element={<Reports />} />
+            <Route path="fba-shipments"     element={<FBAShipmentPlanner />} />
+            <Route path="notifications"     element={<NotificationCenter />} />
+            <Route path="subscription"      element={<Subscription />} />
+            <Route path="settings"          element={<Settings />} />
           </Route>
-          {/* Catch-all — sends unknown paths to dashboard or login */}
           <Route path="*" element={<Navigate to={isAuthenticated ? '/' : '/login'} replace />} />
         </Routes>
       </BrowserRouter>
