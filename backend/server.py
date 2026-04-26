@@ -92,10 +92,25 @@ class Store(Base):
     __tablename__ = "stores"
     id           = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id      = Column(String, ForeignKey("users.id"), nullable=False)
-    marketplace  = Column(String, nullable=False)      # Amazon / Flipkart etc.
+    marketplace  = Column(String, nullable=False)
     store_name   = Column(String, nullable=False)
     seller_id    = Column(String, default="")
     api_token    = Column(String, default="")
+    marketplace_id = Column(String, default="A21TJRUUN4KGV")
+    # SP-API credentials per store
+    sp_client_id     = Column(String, default="")
+    sp_client_secret = Column(String, default="")
+    sp_refresh_token = Column(String, default="")
+    # Ads API credentials per store
+    ads_client_id     = Column(String, default="")
+    ads_client_secret = Column(String, default="")
+    ads_refresh_token = Column(String, default="")
+    ads_profile_id    = Column(String, default="")
+    # cached tokens
+    sp_access_token  = Column(String, default="")
+    sp_token_expiry  = Column(DateTime, nullable=True)
+    ads_access_token = Column(String, default="")
+    ads_token_expiry = Column(DateTime, nullable=True)
     is_connected = Column(Boolean, default=True)
     connected_at = Column(DateTime, default=datetime.utcnow)
     last_sync    = Column(DateTime, nullable=True)
@@ -371,7 +386,14 @@ class StoreCreate(BaseModel):
     marketplace: str
     store_name: str
     seller_id: Optional[str] = ""
-    api_token: Optional[str] = ""
+    marketplace_id: Optional[str] = "A21TJRUUN4KGV"
+    sp_client_id: Optional[str] = ""
+    sp_client_secret: Optional[str] = ""
+    sp_refresh_token: Optional[str] = ""
+    ads_client_id: Optional[str] = ""
+    ads_client_secret: Optional[str] = ""
+    ads_refresh_token: Optional[str] = ""
+    ads_profile_id: Optional[str] = ""
 
 
 class StoreOut(BaseModel):
@@ -379,10 +401,23 @@ class StoreOut(BaseModel):
     marketplace: str
     store_name: str
     seller_id: str
+    marketplace_id: str
     is_connected: bool
     connected_at: datetime
     last_sync: Optional[datetime]
+    has_sp_api: bool = False
+    has_ads_api: bool = False
     class Config: from_attributes = True
+
+    @classmethod
+    def from_store(cls, s):
+        return cls(
+            id=s.id, marketplace=s.marketplace, store_name=s.store_name,
+            seller_id=s.seller_id, marketplace_id=s.marketplace_id or "A21TJRUUN4KGV",
+            is_connected=s.is_connected, connected_at=s.connected_at, last_sync=s.last_sync,
+            has_sp_api=bool(s.sp_refresh_token or SP_API_REFRESH_TOKEN),
+            has_ads_api=bool(s.ads_refresh_token or ADS_REFRESH_TOKEN),
+        )
 
 
 class NotifSettingsIn(BaseModel):
@@ -1208,3 +1243,1902 @@ app.include_router(api)
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=True)
+
+# ══════════════════════════════════════════════════════════════
+#  AMAZON SP-API INTEGRATION
+#  Covers: Orders, Products, Inventory, FBA Shipments
+# ══════════════════════════════════════════════════════════════
+
+# SP-API credentials from environment
+SP_API_CLIENT_ID      = os.getenv("SP_API_CLIENT_ID", "")
+SP_API_CLIENT_SECRET  = os.getenv("SP_API_CLIENT_SECRET", "")
+SP_API_REFRESH_TOKEN  = os.getenv("SP_API_REFRESH_TOKEN", "")
+SP_API_MARKETPLACE_ID = os.getenv("MARKETPLACE_ID", "A21TJRUUN4KGV")  # India default
+SP_API_SELLER_ID      = os.getenv("SELLER_ID", "")
+
+# SP-API endpoints by region
+SP_API_ENDPOINTS = {
+    "A21TJRUUN4KGV": "https://sellingpartnerapi-fe.amazon.com",   # India
+    "ATVPDKIKX0DER": "https://sellingpartnerapi-na.amazon.com",   # US
+    "A1F83G8C2ARO7P": "https://sellingpartnerapi-eu.amazon.com",  # UK
+    "A1PA6795UKMFR9": "https://sellingpartnerapi-eu.amazon.com",  # Germany
+}
+
+LWA_TOKEN_URL = "https://api.amazon.com/auth/o2/token"
+
+# Amazon Ads API credentials
+ADS_CLIENT_ID     = os.getenv("ADS_CLIENT_ID", "")
+ADS_CLIENT_SECRET = os.getenv("ADS_CLIENT_SECRET", "")
+ADS_REFRESH_TOKEN = os.getenv("ADS_REFRESH_TOKEN", os.getenv("SP_API_REFRESH_TOKEN", ""))
+
+# Ads API endpoints by marketplace
+ADS_API_ENDPOINTS = {
+    "A21TJRUUN4KGV": "https://advertising-api-fe.amazon.com",   # India
+    "ATVPDKIKX0DER": "https://advertising-api.amazon.com",      # US
+    "A1F83G8C2ARO7P": "https://advertising-api-eu.amazon.com",  # UK/EU
+}
+
+# ── Token cache (in-memory, refreshed automatically) ──────────
+_token_cache: Dict[str, dict] = {}
+
+
+async def _get_lwa_token(client_id: str, client_secret: str, refresh_token: str,
+                          scope: str = "") -> str:
+    """Get LWA access token using refresh token. Cached for 55 minutes."""
+    cache_key = f"{client_id}:{scope}"
+    cached = _token_cache.get(cache_key)
+    if cached and cached["expires_at"] > datetime.utcnow():
+        return cached["token"]
+
+    payload = {
+        "grant_type":    "refresh_token",
+        "refresh_token": refresh_token,
+        "client_id":     client_id,
+        "client_secret": client_secret,
+    }
+    if scope:
+        payload["scope"] = scope
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.post(LWA_TOKEN_URL, data=payload)
+        r.raise_for_status()
+        data = r.json()
+
+    token = data["access_token"]
+    _token_cache[cache_key] = {
+        "token":      token,
+        "expires_at": datetime.utcnow() + timedelta(minutes=55),
+    }
+    return token
+
+
+async def _sp_api_request(method: str, path: str, params: dict = None,
+                           body: dict = None) -> dict:
+    """Make authenticated SP-API request."""
+    if not SP_API_CLIENT_ID or not SP_API_REFRESH_TOKEN:
+        raise HTTPException(503, "SP-API credentials not configured")
+
+    token = await _get_lwa_token(SP_API_CLIENT_ID, SP_API_CLIENT_SECRET,
+                                  SP_API_REFRESH_TOKEN)
+    base_url = SP_API_ENDPOINTS.get(SP_API_MARKETPLACE_ID,
+                                    "https://sellingpartnerapi-fe.amazon.com")
+    headers = {
+        "x-amz-access-token": token,
+        "Content-Type":       "application/json",
+        "Accept":             "application/json",
+    }
+    url = f"{base_url}{path}"
+    async with httpx.AsyncClient(timeout=30) as client:
+        if method == "GET":
+            r = await client.get(url, headers=headers, params=params or {})
+        elif method == "POST":
+            r = await client.post(url, headers=headers, json=body or {})
+        else:
+            raise ValueError(f"Unsupported method: {method}")
+        r.raise_for_status()
+        return r.json()
+
+
+async def _ads_api_request(method: str, path: str, profile_id: str = None,
+                            params: dict = None, body: dict = None) -> dict:
+    """Make authenticated Amazon Ads API request."""
+    if not ADS_CLIENT_ID or not ADS_REFRESH_TOKEN:
+        raise HTTPException(503, "Ads API credentials not configured")
+
+    token = await _get_lwa_token(ADS_CLIENT_ID, ADS_CLIENT_SECRET,
+                                  ADS_REFRESH_TOKEN,
+                                  scope="advertising::campaign_management")
+    base_url = ADS_API_ENDPOINTS.get(SP_API_MARKETPLACE_ID,
+                                     "https://advertising-api-fe.amazon.com")
+    headers = {
+        "Authorization":        f"Bearer {token}",
+        "Amazon-Advertising-API-ClientId": ADS_CLIENT_ID,
+        "Content-Type":         "application/json",
+    }
+    if profile_id:
+        headers["Amazon-Advertising-API-Scope"] = str(profile_id)
+
+    url = f"{base_url}{path}"
+    async with httpx.AsyncClient(timeout=60) as client:
+        if method == "GET":
+            r = await client.get(url, headers=headers, params=params or {})
+        elif method == "POST":
+            r = await client.post(url, headers=headers, json=body or {})
+        else:
+            raise ValueError(f"Unsupported method: {method}")
+        r.raise_for_status()
+        return r.json()
+
+
+# ══════════════════════════════════════════════════════════════
+#  SP-API ROUTES
+# ══════════════════════════════════════════════════════════════
+spapi_r = APIRouter(prefix="/spapi", tags=["sp-api"])
+
+
+@spapi_r.get("/orders")
+async def get_real_orders(
+    days: int = 30,
+    current: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Fetch real orders from Amazon SP-API and sync to DB."""
+    if not SP_API_CLIENT_ID or not SP_API_REFRESH_TOKEN:
+        return {"orders": [], "message": "SP-API not configured. Add SP_API credentials to Render environment."}
+
+    try:
+        created_after = (datetime.utcnow() - timedelta(days=days)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        data = await _sp_api_request("GET", "/orders/v0/orders", params={
+            "MarketplaceIds": SP_API_MARKETPLACE_ID,
+            "CreatedAfter":   created_after,
+            "OrderStatuses":  "Shipped,Delivered,Unshipped,PartiallyShipped",
+        })
+        orders = data.get("payload", {}).get("Orders", [])
+
+        # sync to DB
+        sid = _store_ids(db, current)
+        if sid:
+            for o in orders:
+                amt = float(o.get("OrderTotal", {}).get("Amount", 0))
+                existing = db.query(Order).filter(
+                    Order.store_id == sid[0],
+                    Order.id == o.get("AmazonOrderId", ""),
+                ).first()
+                if not existing:
+                    db.add(Order(
+                        id=o.get("AmazonOrderId", str(uuid.uuid4())),
+                        store_id=sid[0],
+                        order_date=datetime.strptime(
+                            o.get("PurchaseDate", datetime.utcnow().isoformat()),
+                            "%Y-%m-%dT%H:%M:%SZ"
+                        ),
+                        revenue=amt,
+                        profit=amt * 0.2,
+                        ad_spend=amt * 0.15,
+                        marketplace=o.get("SalesChannel", "Amazon"),
+                        status=o.get("OrderStatus", "shipped").lower(),
+                    ))
+            db.commit()
+
+        return {
+            "orders":        orders[:50],
+            "total":         len(orders),
+            "synced_to_db":  True,
+            "message":       f"Fetched {len(orders)} real orders from Amazon",
+        }
+    except httpx.HTTPStatusError as e:
+        log.error("SP-API orders error: %s", e)
+        return {"orders": [], "error": str(e), "message": "Failed to fetch from Amazon. Check SP-API credentials."}
+    except Exception as e:
+        log.error("SP-API orders error: %s", e)
+        return {"orders": [], "error": str(e)}
+
+
+@spapi_r.get("/inventory")
+async def get_real_inventory(
+    current: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Fetch real FBA inventory from Amazon SP-API."""
+    if not SP_API_CLIENT_ID or not SP_API_REFRESH_TOKEN:
+        return {"inventory": [], "message": "SP-API not configured"}
+
+    try:
+        data = await _sp_api_request("GET", "/fba/inventory/v1/summaries", params={
+            "details":          "true",
+            "granularityType":  "Marketplace",
+            "granularityId":    SP_API_MARKETPLACE_ID,
+            "marketplaceIds":   SP_API_MARKETPLACE_ID,
+        })
+        items = data.get("payload", {}).get("inventorySummaries", [])
+
+        # sync to DB products
+        sid = _store_ids(db, current)
+        if sid:
+            for item in items:
+                asin = item.get("asin", "")
+                qty  = item.get("totalQuantity", 0)
+                existing = db.query(Product).filter(
+                    Product.store_id == sid[0],
+                    Product.asin == asin,
+                ).first()
+                if existing:
+                    existing.stock_level = qty
+                else:
+                    db.add(Product(
+                        store_id=sid[0],
+                        asin=asin,
+                        name=item.get("productName", asin),
+                        sku=item.get("sellerSku", ""),
+                        stock_level=qty,
+                    ))
+            db.commit()
+
+        return {
+            "inventory":    items,
+            "total":        len(items),
+            "synced_to_db": True,
+            "message":      f"Fetched {len(items)} real inventory items from Amazon",
+        }
+    except Exception as e:
+        log.error("SP-API inventory error: %s", e)
+        return {"inventory": [], "error": str(e)}
+
+
+@spapi_r.get("/products")
+async def get_real_products(
+    current: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Fetch real products/catalog from Amazon SP-API."""
+    if not SP_API_CLIENT_ID or not SP_API_REFRESH_TOKEN:
+        return {"products": [], "message": "SP-API not configured"}
+
+    try:
+        data = await _sp_api_request("GET", "/catalog/2022-04-01/items", params={
+            "marketplaceIds": SP_API_MARKETPLACE_ID,
+            "includedData":   "summaries,attributes,salesRanks",
+            "sellerId":       SP_API_SELLER_ID,
+        })
+        items = data.get("items", [])
+        return {
+            "products": items,
+            "total":    len(items),
+            "message":  f"Fetched {len(items)} real products from Amazon",
+        }
+    except Exception as e:
+        log.error("SP-API products error: %s", e)
+        return {"products": [], "error": str(e)}
+
+
+@spapi_r.get("/fba-shipments")
+async def get_fba_shipments(
+    current: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Fetch real FBA inbound shipments from Amazon SP-API."""
+    if not SP_API_CLIENT_ID or not SP_API_REFRESH_TOKEN:
+        return {"shipments": [], "message": "SP-API not configured"}
+
+    try:
+        data = await _sp_api_request(
+            "GET",
+            "/fba/inbound/v0/shipments",
+            params={
+                "MarketplaceId": SP_API_MARKETPLACE_ID,
+                "ShipmentStatusList": "WORKING,SHIPPED,IN_TRANSIT,DELIVERED,CHECKED_IN,RECEIVING,CLOSED",
+                "QueryType": "SHIPMENT",
+            }
+        )
+        shipments = data.get("payload", {}).get("ShipmentData", [])
+        return {
+            "shipments": shipments,
+            "total":     len(shipments),
+            "message":   f"Fetched {len(shipments)} real FBA shipments",
+        }
+    except Exception as e:
+        log.error("SP-API shipments error: %s", e)
+        return {"shipments": [], "error": str(e)}
+
+
+@spapi_r.post("/sync-all")
+async def sync_all_sp_data(
+    current: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Sync ALL SP-API data at once — orders, inventory, products."""
+    results = {}
+    try:
+        orders_res    = await get_real_orders(30, current, db)
+        results["orders"] = orders_res.get("total", 0)
+    except Exception as e:
+        results["orders_error"] = str(e)
+
+    try:
+        inv_res       = await get_real_inventory(current, db)
+        results["inventory"] = inv_res.get("total", 0)
+    except Exception as e:
+        results["inventory_error"] = str(e)
+
+    await _notify(db, current.id, "Amazon Sync Complete",
+                  f"Synced {results.get('orders',0)} orders, "
+                  f"{results.get('inventory',0)} inventory items",
+                  "success")
+    return {"synced": results, "message": "SP-API sync complete"}
+
+
+# ══════════════════════════════════════════════════════════════
+#  AMAZON ADS API ROUTES
+# ══════════════════════════════════════════════════════════════
+ads_r = APIRouter(prefix="/ads", tags=["amazon-ads"])
+
+
+@ads_r.get("/profiles")
+async def get_ads_profiles(current: User = Depends(get_current_user)):
+    """Get all advertising profiles for this account."""
+    if not ADS_CLIENT_ID or not ADS_REFRESH_TOKEN:
+        return {"profiles": [], "message": "Ads API not configured. Add ADS_CLIENT_ID and ADS_REFRESH_TOKEN to Render."}
+    try:
+        profiles = await _ads_api_request("GET", "/v2/profiles")
+        return {"profiles": profiles, "total": len(profiles)}
+    except Exception as e:
+        log.error("Ads profiles error: %s", e)
+        return {"profiles": [], "error": str(e)}
+
+
+@ads_r.get("/campaigns")
+async def get_real_campaigns(
+    profile_id: str,
+    current: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Fetch real campaigns from Amazon Ads API."""
+    if not ADS_CLIENT_ID or not ADS_REFRESH_TOKEN:
+        return {"campaigns": [], "message": "Ads API not configured"}
+    try:
+        data = await _ads_api_request("GET", "/v2/campaigns", profile_id=profile_id,
+                                       params={"stateFilter": "enabled,paused"})
+        campaigns = data if isinstance(data, list) else data.get("campaigns", [])
+
+        # sync to DB
+        sid = _store_ids(db, current)
+        if sid:
+            for c in campaigns:
+                existing = db.query(Campaign).filter(
+                    Campaign.store_id == sid[0],
+                    Campaign.name == c.get("name", ""),
+                ).first()
+                if not existing:
+                    db.add(Campaign(
+                        store_id=sid[0],
+                        name=c.get("name", ""),
+                        campaign_type=c.get("campaignType", "sponsoredProducts"),
+                        status=c.get("state", "enabled"),
+                        daily_budget=float(c.get("dailyBudget", 0)),
+                    ))
+            db.commit()
+
+        return {"campaigns": campaigns, "total": len(campaigns),
+                "message": f"Fetched {len(campaigns)} real campaigns"}
+    except Exception as e:
+        log.error("Ads campaigns error: %s", e)
+        return {"campaigns": [], "error": str(e)}
+
+
+@ads_r.get("/keywords")
+async def get_real_keywords(
+    profile_id: str,
+    campaign_id: str = None,
+    current: User = Depends(get_current_user),
+):
+    """Fetch real keywords from Amazon Ads API."""
+    if not ADS_CLIENT_ID:
+        return {"keywords": [], "message": "Ads API not configured"}
+    try:
+        params = {"stateFilter": "enabled,paused"}
+        if campaign_id:
+            params["campaignIdFilter"] = campaign_id
+        data = await _ads_api_request("GET", "/v2/keywords", profile_id=profile_id,
+                                       params=params)
+        keywords = data if isinstance(data, list) else []
+        return {"keywords": keywords, "total": len(keywords)}
+    except Exception as e:
+        log.error("Ads keywords error: %s", e)
+        return {"keywords": [], "error": str(e)}
+
+
+@ads_r.get("/reports/performance")
+async def get_ads_performance(
+    profile_id: str,
+    days: int = 30,
+    current: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Request a performance report from Amazon Ads API."""
+    if not ADS_CLIENT_ID:
+        return {"report": None, "message": "Ads API not configured"}
+    try:
+        end_date   = datetime.utcnow().strftime("%Y%m%d")
+        start_date = (datetime.utcnow() - timedelta(days=days)).strftime("%Y%m%d")
+
+        report_body = {
+            "reportDate":    end_date,
+            "metrics":       "impressions,clicks,cost,attributedSales30d,attributedOrdersNewToBrand30d,acos",
+            "segment":       "query",
+        }
+        data = await _ads_api_request(
+            "POST",
+            "/v2/sp/keywords/report",
+            profile_id=profile_id,
+            body=report_body,
+        )
+        return {"report_id": data.get("reportId"), "status": data.get("status"),
+                "message": "Report requested. Fetch with report ID when ready."}
+    except Exception as e:
+        log.error("Ads performance error: %s", e)
+        return {"report": None, "error": str(e)}
+
+
+@ads_r.post("/campaigns/update-bid")
+async def update_keyword_bid(
+    profile_id: str,
+    keyword_id: str,
+    new_bid: float,
+    current: User = Depends(get_current_user),
+):
+    """Update keyword bid directly via Amazon Ads API."""
+    if not ADS_CLIENT_ID:
+        raise HTTPException(503, "Ads API not configured")
+    try:
+        data = await _ads_api_request(
+            "PUT",
+            "/v2/keywords",
+            profile_id=profile_id,
+            body=[{"keywordId": keyword_id, "bid": new_bid, "state": "enabled"}],
+        )
+        return {"updated": data, "message": f"Bid updated to ${new_bid}"}
+    except Exception as e:
+        log.error("Ads update bid error: %s", e)
+        raise HTTPException(500, str(e))
+
+
+# ── mount new routers ──────────────────────────────────────────
+api.include_router(spapi_r)
+api.include_router(ads_r)
+
+
+# ==============================================================
+#  AMAZON SP-API INTEGRATION
+#  Covers: Orders, Products, Inventory, FBA Shipments
+# ==============================================================
+
+SP_API_CLIENT_ID     = os.getenv("SP_API_CLIENT_ID", "")
+SP_API_CLIENT_SECRET = os.getenv("SP_API_CLIENT_SECRET", "")
+SP_API_REFRESH_TOKEN = os.getenv("SP_API_REFRESH_TOKEN", "")
+SELLER_ID            = os.getenv("SELLER_ID", "")
+MARKETPLACE_ID       = os.getenv("MARKETPLACE_ID", "A21TJRUUN4KGV")  # India default
+
+# Amazon Ads API
+ADS_CLIENT_ID     = os.getenv("ADS_CLIENT_ID", "")
+ADS_CLIENT_SECRET = os.getenv("ADS_CLIENT_SECRET", "")
+ADS_REFRESH_TOKEN = os.getenv("ADS_REFRESH_TOKEN", "")
+ADS_PROFILE_ID    = os.getenv("ADS_PROFILE_ID", "")
+
+# Marketplace endpoints
+MARKETPLACE_ENDPOINTS = {
+    "A21TJRUUN4KGV": "https://sellingpartnerapi-fe.amazon.com",   # India
+    "ATVPDKIKX0DER": "https://sellingpartnerapi-na.amazon.com",   # US
+    "A1F83G8C2ARO7P": "https://sellingpartnerapi-eu.amazon.com",  # UK
+    "A1PA6795UKMFR9": "https://sellingpartnerapi-eu.amazon.com",  # Germany
+}
+
+ADS_ENDPOINTS = {
+    "A21TJRUUN4KGV": "https://advertising-api-fe.amazon.com",    # India
+    "ATVPDKIKX0DER": "https://advertising-api.amazon.com",       # US
+    "A1F83G8C2ARO7P": "https://advertising-api-eu.amazon.com",   # EU
+}
+
+
+class AmazonTokenCache:
+    """Cache access tokens so we don't refresh on every request."""
+    def __init__(self):
+        self._sp_token: Optional[str] = None
+        self._sp_expiry: Optional[datetime] = None
+        self._ads_token: Optional[str] = None
+        self._ads_expiry: Optional[datetime] = None
+
+    async def get_sp_token(self) -> Optional[str]:
+        if self._sp_token and self._sp_expiry and datetime.utcnow() < self._sp_expiry:
+            return self._sp_token
+        return await self._refresh_sp_token()
+
+    async def _refresh_sp_token(self) -> Optional[str]:
+        if not all([SP_API_CLIENT_ID, SP_API_CLIENT_SECRET, SP_API_REFRESH_TOKEN]):
+            return None
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                r = await client.post(
+                    "https://api.amazon.com/auth/o2/token",
+                    data={
+                        "grant_type": "refresh_token",
+                        "refresh_token": SP_API_REFRESH_TOKEN,
+                        "client_id": SP_API_CLIENT_ID,
+                        "client_secret": SP_API_CLIENT_SECRET,
+                    },
+                )
+                r.raise_for_status()
+                data = r.json()
+                self._sp_token  = data["access_token"]
+                self._sp_expiry = datetime.utcnow() + timedelta(seconds=data.get("expires_in", 3600) - 60)
+                return self._sp_token
+        except Exception as e:
+            log.error("SP-API token refresh failed: %s", e)
+            return None
+
+    async def get_ads_token(self) -> Optional[str]:
+        if self._ads_token and self._ads_expiry and datetime.utcnow() < self._ads_expiry:
+            return self._ads_token
+        return await self._refresh_ads_token()
+
+    async def _refresh_ads_token(self) -> Optional[str]:
+        if not all([ADS_CLIENT_ID, ADS_CLIENT_SECRET, ADS_REFRESH_TOKEN]):
+            return None
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                r = await client.post(
+                    "https://api.amazon.com/auth/o2/token",
+                    data={
+                        "grant_type": "refresh_token",
+                        "refresh_token": ADS_REFRESH_TOKEN,
+                        "client_id": ADS_CLIENT_ID,
+                        "client_secret": ADS_CLIENT_SECRET,
+                    },
+                )
+                r.raise_for_status()
+                data = r.json()
+                self._ads_token  = data["access_token"]
+                self._ads_expiry = datetime.utcnow() + timedelta(seconds=data.get("expires_in", 3600) - 60)
+                return self._ads_token
+        except Exception as e:
+            log.error("Ads API token refresh failed: %s", e)
+            return None
+
+
+token_cache = AmazonTokenCache()
+
+
+def _sp_headers(token: str) -> dict:
+    return {
+        "x-amz-access-token": token,
+        "x-amz-marketplace-id": MARKETPLACE_ID,
+        "Content-Type": "application/json",
+    }
+
+
+def _ads_headers(token: str, profile_id: str = "") -> dict:
+    h = {
+        "Authorization": f"Bearer {token}",
+        "Amazon-Advertising-API-ClientId": ADS_CLIENT_ID,
+        "Content-Type": "application/json",
+    }
+    if profile_id or ADS_PROFILE_ID:
+        h["Amazon-Advertising-API-Scope"] = profile_id or ADS_PROFILE_ID
+    return h
+
+
+def _sp_base() -> str:
+    return MARKETPLACE_ENDPOINTS.get(MARKETPLACE_ID, "https://sellingpartnerapi-fe.amazon.com")
+
+
+def _ads_base() -> str:
+    return ADS_ENDPOINTS.get(MARKETPLACE_ID, "https://advertising-api-fe.amazon.com")
+
+
+# ==============================================================
+#  SP-API — ORDERS
+# ==============================================================
+sp_router = APIRouter(prefix="/sp", tags=["sp-api"])
+
+
+@sp_router.get("/orders")
+async def get_real_orders(
+    days: int = 30,
+    current: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Fetch real orders from Amazon SP-API and sync to database."""
+    token = await token_cache.get_sp_token()
+    if not token:
+        return {"orders": [], "message": "SP-API not configured. Add SP_API credentials to Render environment."}
+
+    created_after = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    url = f"{_sp_base()}/orders/v0/orders"
+    params = {
+        "MarketplaceIds": MARKETPLACE_ID,
+        "CreatedAfter": created_after,
+        "OrderStatuses": "Shipped,Delivered,Unshipped,PartiallyShipped",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.get(url, headers=_sp_headers(token), params=params)
+            r.raise_for_status()
+            data = r.json()
+
+        orders = data.get("payload", {}).get("Orders", [])
+
+        # sync to DB
+        sid = _store_ids(db, current)
+        if sid:
+            for o in orders:
+                amount = float(o.get("OrderTotal", {}).get("Amount", 0))
+                existing = db.query(Order).filter(Order.id == o["AmazonOrderId"]).first()
+                if not existing:
+                    order_date = datetime.strptime(o["PurchaseDate"][:19], "%Y-%m-%dT%H:%M:%S")
+                    db.add(Order(
+                        id=o["AmazonOrderId"],
+                        store_id=sid[0],
+                        order_date=order_date,
+                        revenue=amount,
+                        profit=amount * 0.2,
+                        ad_spend=amount * 0.15,
+                        marketplace="Amazon",
+                        status=o.get("OrderStatus", "shipped"),
+                    ))
+            db.commit()
+
+        return {
+            "orders": orders[:50],
+            "total": len(orders),
+            "message": f"Fetched {len(orders)} real orders from Amazon",
+        }
+    except httpx.HTTPStatusError as e:
+        log.error("SP-API orders error: %s %s", e.response.status_code, e.response.text)
+        raise HTTPException(500, f"Amazon API error: {e.response.status_code}")
+    except Exception as e:
+        log.error("SP-API orders error: %s", e)
+        raise HTTPException(500, "Failed to fetch orders from Amazon")
+
+
+# ==============================================================
+#  SP-API — PRODUCTS / CATALOG
+# ==============================================================
+@sp_router.get("/products")
+async def get_real_products(
+    current: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Fetch real products from Amazon SP-API catalog."""
+    token = await token_cache.get_sp_token()
+    if not token:
+        return {"products": [], "message": "SP-API not configured"}
+
+    url = f"{_sp_base()}/listings/2021-08-01/items/{SELLER_ID}"
+    params = {"marketplaceIds": MARKETPLACE_ID, "pageSize": 50}
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.get(url, headers=_sp_headers(token), params=params)
+            r.raise_for_status()
+            data = r.json()
+
+        items = data.get("items", [])
+        sid = _store_ids(db, current)
+        products = []
+
+        for item in items:
+            asin = item.get("asin", "")
+            summaries = item.get("summaries", [{}])[0]
+            name = summaries.get("itemName", asin)
+            price = 0.0
+            prices = item.get("offers", [{}])
+            if prices:
+                price = float(prices[0].get("buyingPrice", {}).get("listingPrice", {}).get("amount", 0))
+
+            # sync to DB
+            if sid:
+                existing = db.query(Product).filter(
+                    Product.asin == asin, Product.store_id == sid[0]
+                ).first()
+                if not existing:
+                    db.add(Product(store_id=sid[0], asin=asin, name=name, price=price))
+
+            products.append({"asin": asin, "name": name, "price": price})
+
+        if sid: db.commit()
+        return {"products": products, "total": len(products)}
+
+    except Exception as e:
+        log.error("SP-API products error: %s", e)
+        return {"products": [], "message": str(e)}
+
+
+# ==============================================================
+#  SP-API — INVENTORY
+# ==============================================================
+@sp_router.get("/inventory")
+async def get_real_inventory(
+    current: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Fetch real FBA inventory from Amazon SP-API."""
+    token = await token_cache.get_sp_token()
+    if not token:
+        return {"inventory": [], "message": "SP-API not configured"}
+
+    url = f"{_sp_base()}/fba/inventory/v1/summaries"
+    params = {
+        "details": "true",
+        "granularityType": "Marketplace",
+        "granularityId": MARKETPLACE_ID,
+        "marketplaceIds": MARKETPLACE_ID,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.get(url, headers=_sp_headers(token), params=params)
+            r.raise_for_status()
+            data = r.json()
+
+        inventory = data.get("payload", {}).get("inventorySummaries", [])
+
+        # sync stock levels to DB
+        sid = _store_ids(db, current)
+        for item in inventory:
+            asin = item.get("asin", "")
+            qty  = item.get("inventoryDetails", {}).get("fulfillableQuantity", 0)
+            if sid:
+                prod = db.query(Product).filter(
+                    Product.asin == asin, Product.store_id == sid[0]
+                ).first()
+                if prod:
+                    prod.stock_level = qty
+        if sid: db.commit()
+
+        return {
+            "inventory": inventory,
+            "total": len(inventory),
+            "low_stock": [i for i in inventory if i.get("inventoryDetails", {}).get("fulfillableQuantity", 0) < 50],
+        }
+    except Exception as e:
+        log.error("SP-API inventory error: %s", e)
+        return {"inventory": [], "message": str(e)}
+
+
+# ==============================================================
+#  SP-API — FBA SHIPMENTS
+# ==============================================================
+@sp_router.get("/shipments")
+async def get_real_shipments(
+    current: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Fetch real FBA inbound shipments from Amazon SP-API."""
+    token = await token_cache.get_sp_token()
+    if not token:
+        return {"shipments": [], "message": "SP-API not configured"}
+
+    url = f"{_sp_base()}/fba/inbound/v0/shipments"
+    params = {
+        "MarketplaceId": MARKETPLACE_ID,
+        "ShipmentStatusList": "WORKING,SHIPPED,IN_TRANSIT,DELIVERED,CHECKED_IN,RECEIVING,CLOSED",
+        "QueryType": "SHIPMENT",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.get(url, headers=_sp_headers(token), params=params)
+            r.raise_for_status()
+            data = r.json()
+
+        shipments = data.get("payload", {}).get("ShipmentData", [])
+        return {
+            "shipments": shipments,
+            "total": len(shipments),
+        }
+    except Exception as e:
+        log.error("SP-API shipments error: %s", e)
+        return {"shipments": [], "message": str(e)}
+
+
+# ==============================================================
+#  AMAZON ADS API
+#  Covers: Profiles, Campaigns, Ad Groups, Keywords, Reports
+# ==============================================================
+ads_router = APIRouter(prefix="/ads", tags=["ads-api"])
+
+
+@ads_router.get("/profiles")
+async def get_ads_profiles(current: User = Depends(get_current_user)):
+    """Get all advertising profiles — find your profile ID here."""
+    token = await token_cache.get_ads_token()
+    if not token:
+        return {"profiles": [], "message": "Ads API not configured. Add ADS_CLIENT_ID, ADS_CLIENT_SECRET, ADS_REFRESH_TOKEN to Render."}
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.get(
+                f"{_ads_base()}/v2/profiles",
+                headers=_ads_headers(token),
+            )
+            r.raise_for_status()
+            profiles = r.json()
+        return {
+            "profiles": profiles,
+            "tip": "Copy your profileId and add it as ADS_PROFILE_ID in Render environment",
+        }
+    except Exception as e:
+        log.error("Ads profiles error: %s", e)
+        return {"profiles": [], "message": str(e)}
+
+
+@ads_router.get("/campaigns")
+async def get_real_campaigns(
+    current: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Fetch real campaigns from Amazon Ads API and sync to database."""
+    token = await token_cache.get_ads_token()
+    if not token:
+        return {"campaigns": [], "message": "Ads API not configured"}
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.get(
+                f"{_ads_base()}/v2/sp/campaigns",
+                headers=_ads_headers(token),
+                params={"stateFilter": "enabled,paused"},
+            )
+            r.raise_for_status()
+            campaigns = r.json()
+
+        # sync to DB
+        sid = _store_ids(db, current)
+        synced = 0
+        for camp in campaigns:
+            if not sid: break
+            existing = db.query(Campaign).filter(
+                Campaign.id == str(camp["campaignId"])
+            ).first()
+            if not existing:
+                db.add(Campaign(
+                    id=str(camp["campaignId"]),
+                    store_id=sid[0],
+                    name=camp.get("name", ""),
+                    campaign_type="sponsored_products",
+                    status=camp.get("state", "active"),
+                    daily_budget=float(camp.get("dailyBudget", 0)),
+                    target_acos=float(camp.get("targetAcos", 25) or 25),
+                ))
+                synced += 1
+        if sid and synced: db.commit()
+
+        return {
+            "campaigns": campaigns,
+            "total": len(campaigns),
+            "synced_to_db": synced,
+        }
+    except Exception as e:
+        log.error("Ads campaigns error: %s", e)
+        return {"campaigns": [], "message": str(e)}
+
+
+@ads_router.get("/keywords")
+async def get_real_keywords(
+    campaign_id: Optional[str] = None,
+    current: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Fetch real keywords from Amazon Ads API."""
+    token = await token_cache.get_ads_token()
+    if not token:
+        return {"keywords": [], "message": "Ads API not configured"}
+
+    params = {"stateFilter": "enabled,paused"}
+    if campaign_id:
+        params["campaignIdFilter"] = campaign_id
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.get(
+                f"{_ads_base()}/v2/sp/keywords",
+                headers=_ads_headers(token),
+                params=params,
+            )
+            r.raise_for_status()
+            keywords = r.json()
+        return {"keywords": keywords, "total": len(keywords)}
+    except Exception as e:
+        log.error("Ads keywords error: %s", e)
+        return {"keywords": [], "message": str(e)}
+
+
+@ads_router.post("/keywords/{keyword_id}/bid")
+async def update_keyword_bid(
+    keyword_id: str,
+    data: Dict[str, Any],
+    current: User = Depends(get_current_user),
+):
+    """Update a keyword bid directly on Amazon Ads API."""
+    token = await token_cache.get_ads_token()
+    if not token:
+        raise HTTPException(400, "Ads API not configured")
+
+    new_bid = data.get("bid")
+    if not new_bid:
+        raise HTTPException(400, "bid is required")
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.put(
+                f"{_ads_base()}/v2/sp/keywords",
+                headers=_ads_headers(token),
+                json=[{"keywordId": keyword_id, "bid": new_bid, "state": "enabled"}],
+            )
+            r.raise_for_status()
+        return {"ok": True, "keyword_id": keyword_id, "new_bid": new_bid}
+    except Exception as e:
+        log.error("Ads keyword bid update error: %s", e)
+        raise HTTPException(500, str(e))
+
+
+@ads_router.get("/reports/performance")
+async def get_ads_performance(
+    days: int = 30,
+    current: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Request a performance report from Amazon Ads API (async)."""
+    token = await token_cache.get_ads_token()
+    if not token:
+        return {"message": "Ads API not configured"}
+
+    end_date   = datetime.utcnow().strftime("%Y%m%d")
+    start_date = (datetime.utcnow() - timedelta(days=days)).strftime("%Y%m%d")
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            # Request report
+            r = await client.post(
+                f"{_ads_base()}/v2/sp/campaigns/report",
+                headers=_ads_headers(token),
+                json={
+                    "reportDate": end_date,
+                    "metrics": "campaignName,impressions,clicks,cost,attributedSales30d,attributedOrdersNewToBrand30d,acos",
+                },
+            )
+            r.raise_for_status()
+            report = r.json()
+
+        return {
+            "report_id": report.get("reportId"),
+            "status": report.get("status"),
+            "message": "Report requested. Use /ads/reports/{report_id} to download when ready.",
+        }
+    except Exception as e:
+        log.error("Ads report error: %s", e)
+        return {"message": str(e)}
+
+
+@ads_router.get("/sync-all")
+async def sync_all_ads_data(
+    current: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Sync ALL Amazon Ads data to database in one call."""
+    token = await token_cache.get_ads_token()
+    if not token:
+        return {"message": "Ads API not configured. Add ADS credentials to Render."}
+
+    results = {}
+
+    # campaigns
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.get(f"{_ads_base()}/v2/sp/campaigns",
+                                 headers=_ads_headers(token),
+                                 params={"stateFilter": "enabled,paused"})
+            r.raise_for_status()
+            campaigns = r.json()
+        results["campaigns"] = len(campaigns)
+
+        sid = _store_ids(db, current)
+        for camp in campaigns:
+            if not sid: break
+            existing = db.query(Campaign).filter(Campaign.id == str(camp["campaignId"])).first()
+            if existing:
+                existing.status       = camp.get("state", existing.status)
+                existing.daily_budget = float(camp.get("dailyBudget", existing.daily_budget))
+            else:
+                db.add(Campaign(
+                    id=str(camp["campaignId"]),
+                    store_id=sid[0],
+                    name=camp.get("name", ""),
+                    campaign_type="sponsored_products",
+                    status=camp.get("state", "active"),
+                    daily_budget=float(camp.get("dailyBudget", 0)),
+                    target_acos=25.0,
+                ))
+        db.commit()
+    except Exception as e:
+        results["campaigns_error"] = str(e)
+
+    # keywords
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.get(f"{_ads_base()}/v2/sp/keywords",
+                                 headers=_ads_headers(token),
+                                 params={"stateFilter": "enabled,paused"})
+            r.raise_for_status()
+            keywords = r.json()
+        results["keywords"] = len(keywords)
+
+        sid = _store_ids(db, current)
+        for kw in keywords:
+            existing = db.query(Keyword).filter(Keyword.id == str(kw["keywordId"])).first()
+            if existing:
+                existing.bid    = float(kw.get("bid", existing.bid))
+                existing.status = kw.get("state", existing.status)
+            else:
+                db.add(Keyword(
+                    id=str(kw["keywordId"]),
+                    campaign_id=str(kw.get("campaignId", "")),
+                    keyword_text=kw.get("keywordText", ""),
+                    match_type=kw.get("matchType", "exact"),
+                    bid=float(kw.get("bid", 1.0)),
+                    status=kw.get("state", "active"),
+                ))
+        db.commit()
+    except Exception as e:
+        results["keywords_error"] = str(e)
+
+    await _notify(db, current.id,
+                  "Amazon Ads synced",
+                  f"Synced {results.get('campaigns',0)} campaigns, {results.get('keywords',0)} keywords",
+                  "success")
+
+    return {"synced": results, "message": "Amazon Ads data synced successfully!"}
+
+
+# ==============================================================
+#  COMBINED SYNC — calls SP-API + Ads API together
+# ==============================================================
+sync_router = APIRouter(prefix="/sync", tags=["sync"])
+
+
+@sync_router.post("/all")
+async def sync_everything(
+    current: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """One-click sync of ALL Amazon data — Orders + Inventory + Campaigns + Keywords."""
+    results = {}
+
+    # SP-API sync
+    sp_token = await token_cache.get_sp_token()
+    if sp_token:
+        try:
+            # orders
+            created_after = (datetime.utcnow() - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            async with httpx.AsyncClient(timeout=30) as client:
+                r = await client.get(
+                    f"{_sp_base()}/orders/v0/orders",
+                    headers=_sp_headers(sp_token),
+                    params={"MarketplaceIds": MARKETPLACE_ID, "CreatedAfter": created_after},
+                )
+                r.raise_for_status()
+                orders = r.json().get("payload", {}).get("Orders", [])
+
+            sid = _store_ids(db, current)
+            new_orders = 0
+            for o in orders:
+                if sid and not db.query(Order).filter(Order.id == o["AmazonOrderId"]).first():
+                    amount = float(o.get("OrderTotal", {}).get("Amount", 0))
+                    order_date = datetime.strptime(o["PurchaseDate"][:19], "%Y-%m-%dT%H:%M:%S")
+                    db.add(Order(
+                        id=o["AmazonOrderId"], store_id=sid[0],
+                        order_date=order_date, revenue=amount,
+                        profit=amount*0.2, ad_spend=amount*0.15,
+                        marketplace="Amazon", status=o.get("OrderStatus", "shipped"),
+                    ))
+                    new_orders += 1
+            db.commit()
+            results["new_orders"] = new_orders
+            results["total_orders"] = len(orders)
+        except Exception as e:
+            results["orders_error"] = str(e)
+
+        try:
+            # inventory
+            async with httpx.AsyncClient(timeout=30) as client:
+                r = await client.get(
+                    f"{_sp_base()}/fba/inventory/v1/summaries",
+                    headers=_sp_headers(sp_token),
+                    params={"details": "true", "granularityType": "Marketplace",
+                            "granularityId": MARKETPLACE_ID, "marketplaceIds": MARKETPLACE_ID},
+                )
+                r.raise_for_status()
+                inventory = r.json().get("payload", {}).get("inventorySummaries", [])
+
+            sid = _store_ids(db, current)
+            for item in inventory:
+                asin = item.get("asin", "")
+                qty  = item.get("inventoryDetails", {}).get("fulfillableQuantity", 0)
+                if sid:
+                    prod = db.query(Product).filter(Product.asin == asin, Product.store_id == sid[0]).first()
+                    if prod: prod.stock_level = qty
+            db.commit()
+            results["inventory_items"] = len(inventory)
+        except Exception as e:
+            results["inventory_error"] = str(e)
+    else:
+        results["sp_api"] = "Not configured — add SP_API_CLIENT_ID, SP_API_CLIENT_SECRET, SP_API_REFRESH_TOKEN to Render"
+
+    # Ads API sync
+    ads_token = await token_cache.get_ads_token()
+    if ads_token:
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                r = await client.get(
+                    f"{_ads_base()}/v2/sp/campaigns",
+                    headers=_ads_headers(ads_token),
+                    params={"stateFilter": "enabled,paused"},
+                )
+                r.raise_for_status()
+                campaigns = r.json()
+
+            sid = _store_ids(db, current)
+            new_camps = 0
+            for camp in campaigns:
+                if not sid: break
+                existing = db.query(Campaign).filter(Campaign.id == str(camp["campaignId"])).first()
+                if existing:
+                    existing.status       = camp.get("state", existing.status)
+                    existing.daily_budget = float(camp.get("dailyBudget", existing.daily_budget))
+                else:
+                    db.add(Campaign(
+                        id=str(camp["campaignId"]), store_id=sid[0],
+                        name=camp.get("name",""), campaign_type="sponsored_products",
+                        status=camp.get("state","active"),
+                        daily_budget=float(camp.get("dailyBudget",0)), target_acos=25.0,
+                    ))
+                    new_camps += 1
+            db.commit()
+            results["campaigns"] = len(campaigns)
+            results["new_campaigns"] = new_camps
+        except Exception as e:
+            results["campaigns_error"] = str(e)
+    else:
+        results["ads_api"] = "Not configured — add ADS_CLIENT_ID, ADS_CLIENT_SECRET, ADS_REFRESH_TOKEN to Render"
+
+    # notify user
+    msg = f"Synced: {results.get('total_orders',0)} orders, {results.get('inventory_items',0)} inventory items, {results.get('campaigns',0)} campaigns"
+    await _notify(db, current.id, "Sync complete", msg, "success")
+
+    return {"results": results, "message": msg}
+
+
+@sync_router.get("/status")
+async def sync_status(current: User = Depends(get_current_user)):
+    """Check which APIs are configured and ready."""
+    sp_ready  = all([SP_API_CLIENT_ID, SP_API_CLIENT_SECRET, SP_API_REFRESH_TOKEN])
+    ads_ready = all([ADS_CLIENT_ID, ADS_CLIENT_SECRET, ADS_REFRESH_TOKEN])
+    return {
+        "sp_api": {
+            "configured": sp_ready,
+            "covers": ["Orders", "Products", "Inventory", "FBA Shipments"],
+            "missing": [] if sp_ready else ["SP_API_CLIENT_ID", "SP_API_CLIENT_SECRET", "SP_API_REFRESH_TOKEN"],
+        },
+        "ads_api": {
+            "configured": ads_ready,
+            "covers": ["Campaigns", "Keywords", "Bids", "ACoS", "ROAS"],
+            "missing": [] if ads_ready else ["ADS_CLIENT_ID", "ADS_CLIENT_SECRET", "ADS_REFRESH_TOKEN"],
+            "profile_set": bool(ADS_PROFILE_ID),
+        },
+        "seller_id":    SELLER_ID or "NOT SET — add SELLER_ID to Render",
+        "marketplace":  MARKETPLACE_ID,
+    }
+
+
+# Mount the new routers
+api.include_router(sp_router)
+api.include_router(ads_router)
+api.include_router(sync_router)
+
+
+# ==============================================================
+#  PER-STORE TOKEN HELPERS
+#  Each store uses its own credentials, falls back to global env
+# ==============================================================
+
+async def get_store_sp_token(store: Store) -> Optional[str]:
+    """Get SP-API token for a specific store — uses store credentials or global fallback."""
+    # check cached token
+    if store.sp_access_token and store.sp_token_expiry and datetime.utcnow() < store.sp_token_expiry:
+        return store.sp_access_token
+
+    # use store-specific credentials, fall back to global env
+    client_id     = store.sp_client_id     or SP_API_CLIENT_ID
+    client_secret = store.sp_client_secret or SP_API_CLIENT_SECRET
+    refresh_token = store.sp_refresh_token or SP_API_REFRESH_TOKEN
+
+    if not all([client_id, client_secret, refresh_token]):
+        return None
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.post(
+                "https://api.amazon.com/auth/o2/token",
+                data={
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh_token,
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                },
+            )
+            r.raise_for_status()
+            data = r.json()
+            # cache in store object (caller must commit)
+            store.sp_access_token = data["access_token"]
+            store.sp_token_expiry = datetime.utcnow() + timedelta(seconds=data.get("expires_in", 3600) - 60)
+            return store.sp_access_token
+    except Exception as e:
+        log.error("Store %s SP token error: %s", store.store_name, e)
+        return None
+
+
+async def get_store_ads_token(store: Store) -> Optional[str]:
+    """Get Ads API token for a specific store."""
+    if store.ads_access_token and store.ads_token_expiry and datetime.utcnow() < store.ads_token_expiry:
+        return store.ads_access_token
+
+    client_id     = store.ads_client_id     or ADS_CLIENT_ID
+    client_secret = store.ads_client_secret or ADS_CLIENT_SECRET
+    refresh_token = store.ads_refresh_token or ADS_REFRESH_TOKEN
+
+    if not all([client_id, client_secret, refresh_token]):
+        return None
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.post(
+                "https://api.amazon.com/auth/o2/token",
+                data={
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh_token,
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                },
+            )
+            r.raise_for_status()
+            data = r.json()
+            store.ads_access_token = data["access_token"]
+            store.ads_token_expiry = datetime.utcnow() + timedelta(seconds=data.get("expires_in", 3600) - 60)
+            return store.ads_access_token
+    except Exception as e:
+        log.error("Store %s Ads token error: %s", store.store_name, e)
+        return None
+
+
+def _store_sp_headers(token: str, marketplace_id: str) -> dict:
+    return {
+        "x-amz-access-token": token,
+        "x-amz-marketplace-id": marketplace_id,
+        "Content-Type": "application/json",
+    }
+
+
+def _store_ads_headers(token: str, client_id: str, profile_id: str) -> dict:
+    return {
+        "Authorization": f"Bearer {token}",
+        "Amazon-Advertising-API-ClientId": client_id or ADS_CLIENT_ID,
+        "Amazon-Advertising-API-Scope": profile_id or ADS_PROFILE_ID,
+        "Content-Type": "application/json",
+    }
+
+
+# ==============================================================
+#  MULTI-STORE SYNC ROUTER
+# ==============================================================
+multi_router = APIRouter(prefix="/multi-store", tags=["multi-store"])
+
+
+@multi_router.get("/status")
+async def multi_store_status(
+    current: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Show all connected stores and their API status."""
+    stores = db.query(Store).filter(Store.user_id == current.id).all()
+    result = []
+    for s in stores:
+        result.append({
+            "id": s.id,
+            "store_name": s.store_name,
+            "marketplace": s.marketplace,
+            "marketplace_id": s.marketplace_id or "A21TJRUUN4KGV",
+            "seller_id": s.seller_id,
+            "sp_api_ready": bool(s.sp_refresh_token or SP_API_REFRESH_TOKEN),
+            "ads_api_ready": bool(s.ads_refresh_token or ADS_REFRESH_TOKEN),
+            "ads_profile_set": bool(s.ads_profile_id or ADS_PROFILE_ID),
+            "last_sync": s.last_sync.isoformat() if s.last_sync else None,
+        })
+    return {
+        "stores": result,
+        "total": len(result),
+        "all_synced": all(s["sp_api_ready"] for s in result),
+    }
+
+
+@multi_router.post("/sync/{store_id}")
+async def sync_single_store(
+    store_id: str,
+    current: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Sync one specific store using its own credentials."""
+    store = db.query(Store).filter(
+        Store.id == store_id, Store.user_id == current.id
+    ).first()
+    if not store:
+        raise HTTPException(404, "Store not found")
+
+    results = {"store": store.store_name}
+    mp_id = store.marketplace_id or MARKETPLACE_ID
+    sp_base = MARKETPLACE_ENDPOINTS.get(mp_id, "https://sellingpartnerapi-fe.amazon.com")
+
+    # SP-API sync for this store
+    sp_token = await get_store_sp_token(store)
+    if sp_token:
+        db.commit()  # save cached token
+        try:
+            created_after = (datetime.utcnow() - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            async with httpx.AsyncClient(timeout=30) as client:
+                r = await client.get(
+                    f"{sp_base}/orders/v0/orders",
+                    headers=_store_sp_headers(sp_token, mp_id),
+                    params={"MarketplaceIds": mp_id, "CreatedAfter": created_after},
+                )
+                r.raise_for_status()
+                orders = r.json().get("payload", {}).get("Orders", [])
+
+            new_orders = 0
+            for o in orders:
+                if not db.query(Order).filter(Order.id == o["AmazonOrderId"]).first():
+                    amount = float(o.get("OrderTotal", {}).get("Amount", 0))
+                    order_date = datetime.strptime(o["PurchaseDate"][:19], "%Y-%m-%dT%H:%M:%S")
+                    db.add(Order(
+                        id=o["AmazonOrderId"], store_id=store.id,
+                        order_date=order_date, revenue=amount,
+                        profit=amount*0.2, ad_spend=amount*0.15,
+                        marketplace=store.marketplace, status=o.get("OrderStatus","shipped"),
+                    ))
+                    new_orders += 1
+            db.commit()
+            results["new_orders"] = new_orders
+            results["total_orders"] = len(orders)
+        except Exception as e:
+            results["orders_error"] = str(e)
+
+        # inventory
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                r = await client.get(
+                    f"{sp_base}/fba/inventory/v1/summaries",
+                    headers=_store_sp_headers(sp_token, mp_id),
+                    params={"details":"true","granularityType":"Marketplace",
+                            "granularityId":mp_id,"marketplaceIds":mp_id},
+                )
+                r.raise_for_status()
+                inventory = r.json().get("payload",{}).get("inventorySummaries",[])
+
+            for item in inventory:
+                asin = item.get("asin","")
+                qty  = item.get("inventoryDetails",{}).get("fulfillableQuantity",0)
+                prod = db.query(Product).filter(Product.asin==asin, Product.store_id==store.id).first()
+                if prod: prod.stock_level = qty
+            db.commit()
+            results["inventory_items"] = len(inventory)
+        except Exception as e:
+            results["inventory_error"] = str(e)
+    else:
+        results["sp_api"] = "No credentials — add sp_refresh_token to this store"
+
+    # Ads API sync for this store
+    ads_token = await get_store_ads_token(store)
+    if ads_token:
+        db.commit()
+        ads_base   = ADS_ENDPOINTS.get(mp_id, "https://advertising-api-fe.amazon.com")
+        client_id  = store.ads_client_id  or ADS_CLIENT_ID
+        profile_id = store.ads_profile_id or ADS_PROFILE_ID
+
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                r = await client.get(
+                    f"{ads_base}/v2/sp/campaigns",
+                    headers=_store_ads_headers(ads_token, client_id, profile_id),
+                    params={"stateFilter":"enabled,paused"},
+                )
+                r.raise_for_status()
+                campaigns = r.json()
+
+            new_camps = 0
+            for camp in campaigns:
+                existing = db.query(Campaign).filter(Campaign.id==str(camp["campaignId"])).first()
+                if existing:
+                    existing.status       = camp.get("state", existing.status)
+                    existing.daily_budget = float(camp.get("dailyBudget", existing.daily_budget))
+                else:
+                    db.add(Campaign(
+                        id=str(camp["campaignId"]), store_id=store.id,
+                        name=camp.get("name",""), campaign_type="sponsored_products",
+                        status=camp.get("state","active"),
+                        daily_budget=float(camp.get("dailyBudget",0)), target_acos=25.0,
+                    ))
+                    new_camps += 1
+            db.commit()
+            results["campaigns"] = len(campaigns)
+            results["new_campaigns"] = new_camps
+        except Exception as e:
+            results["campaigns_error"] = str(e)
+    else:
+        results["ads_api"] = "No credentials — add ads_refresh_token to this store"
+
+    # update last sync
+    store.last_sync = datetime.utcnow()
+    db.commit()
+
+    await _notify(db, current.id,
+                  f"{store.store_name} synced",
+                  f"Orders: {results.get('total_orders',0)}, Campaigns: {results.get('campaigns',0)}",
+                  "success")
+
+    return results
+
+
+@multi_router.post("/sync-all")
+async def sync_all_stores(
+    current: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Sync ALL connected stores at once — each using its own credentials."""
+    stores = db.query(Store).filter(Store.user_id == current.id).all()
+    if not stores:
+        return {"message": "No stores connected"}
+
+    all_results = []
+    for store in stores:
+        try:
+            # reuse single store sync logic
+            result = await sync_single_store.__wrapped__(store.id, current, db) \
+                if hasattr(sync_single_store, '__wrapped__') \
+                else {"store": store.store_name, "note": "Use /multi-store/sync/{id} per store"}
+            all_results.append(result)
+        except Exception as e:
+            all_results.append({"store": store.store_name, "error": str(e)})
+
+    return {
+        "synced_stores": len(stores),
+        "results": all_results,
+    }
+
+
+@multi_router.patch("/{store_id}/credentials")
+async def update_store_credentials(
+    store_id: str,
+    data: Dict[str, Any],
+    current: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Update SP-API or Ads API credentials for a specific store."""
+    store = db.query(Store).filter(
+        Store.id == store_id, Store.user_id == current.id
+    ).first()
+    if not store:
+        raise HTTPException(404, "Store not found")
+
+    allowed = [
+        "sp_client_id", "sp_client_secret", "sp_refresh_token",
+        "ads_client_id", "ads_client_secret", "ads_refresh_token",
+        "ads_profile_id", "seller_id", "marketplace_id",
+    ]
+    updated = []
+    for key in allowed:
+        if key in data:
+            setattr(store, key, data[key])
+            # clear cached token when credentials change
+            if "sp_" in key:
+                store.sp_access_token = ""
+                store.sp_token_expiry = None
+            if "ads_" in key:
+                store.ads_access_token = ""
+                store.ads_token_expiry = None
+            updated.append(key)
+
+    db.commit()
+    return {
+        "ok": True,
+        "updated": updated,
+        "store": store.store_name,
+        "sp_api_ready":  bool(store.sp_refresh_token  or SP_API_REFRESH_TOKEN),
+        "ads_api_ready": bool(store.ads_refresh_token or ADS_REFRESH_TOKEN),
+    }
+
+
+# Mount multi-store router
+api.include_router(multi_router)
+
+
+# ==============================================================
+#  AMAZON OAUTH 2.0 FLOW
+#  User clicks "Connect Amazon" → redirected to Amazon login
+#  → Amazon sends back authorization code
+#  → We exchange for refresh token automatically
+#  → Store saved, user redirected back to dashboard
+#  No manual token entry needed!
+# ==============================================================
+
+import hashlib
+import secrets
+from urllib.parse import urlencode, quote
+
+oauth_router = APIRouter(prefix="/amazon", tags=["amazon-oauth"])
+
+FRONTEND_URL = os.getenv("FRONTEND_URL", "https://sellervector-frontend.onrender.com")
+
+# Marketplace config
+MARKETPLACES = {
+    "IN": {
+        "name": "Amazon India",
+        "marketplace_id": "A21TJRUUN4KGV",
+        "region": "fe",
+        "seller_central": "https://sellercentral.amazon.in",
+        "ads_region": "https://advertising-api-fe.amazon.com",
+        "sp_endpoint": "https://sellingpartnerapi-fe.amazon.com",
+    },
+    "US": {
+        "name": "Amazon US",
+        "marketplace_id": "ATVPDKIKX0DER",
+        "region": "na",
+        "seller_central": "https://sellercentral.amazon.com",
+        "ads_region": "https://advertising-api.amazon.com",
+        "sp_endpoint": "https://sellingpartnerapi-na.amazon.com",
+    },
+    "UK": {
+        "name": "Amazon UK",
+        "marketplace_id": "A1F83G8C2ARO7P",
+        "region": "eu",
+        "seller_central": "https://sellercentral.amazon.co.uk",
+        "ads_region": "https://advertising-api-eu.amazon.com",
+        "sp_endpoint": "https://sellingpartnerapi-eu.amazon.com",
+    },
+    "DE": {
+        "name": "Amazon Germany",
+        "marketplace_id": "A1PA6795UKMFR9",
+        "region": "eu",
+        "seller_central": "https://sellercentral.amazon.de",
+        "ads_region": "https://advertising-api-eu.amazon.com",
+        "sp_endpoint": "https://sellingpartnerapi-eu.amazon.com",
+    },
+    "AE": {
+        "name": "Amazon UAE",
+        "marketplace_id": "A2VIGQ35RCS4UG",
+        "region": "fe",
+        "seller_central": "https://sellercentral.amazon.ae",
+        "ads_region": "https://advertising-api-fe.amazon.com",
+        "sp_endpoint": "https://sellingpartnerapi-fe.amazon.com",
+    },
+}
+
+# temporary state store (in production use Redis)
+_oauth_states: Dict[str, dict] = {}
+
+
+@oauth_router.get("/connect/url")
+async def get_amazon_connect_url(
+    marketplace: str = "IN",
+    store_name: str = "My Store",
+    current: User = Depends(get_current_user),
+):
+    """
+    Step 1 of OAuth flow.
+    Frontend calls this → gets a URL → redirects user to Amazon login.
+    """
+    mp = MARKETPLACES.get(marketplace.upper())
+    if not mp:
+        raise HTTPException(400, f"Unknown marketplace. Use: {list(MARKETPLACES.keys())}")
+
+    if not SP_API_CLIENT_ID:
+        raise HTTPException(400, "SP_API_CLIENT_ID not configured in Render environment")
+
+    # generate state token to prevent CSRF
+    state = secrets.token_urlsafe(32)
+    _oauth_states[state] = {
+        "user_id":    current.id,
+        "marketplace": marketplace.upper(),
+        "store_name": store_name,
+        "created_at": datetime.utcnow().isoformat(),
+    }
+
+    # Build Amazon authorization URL
+    callback_url = f"https://sellervector-backend.onrender.com/api/amazon/callback"
+
+    params = {
+        "application_id": SP_API_CLIENT_ID,
+        "state": state,
+        "redirect_uri": callback_url,
+        "version": "beta",
+    }
+
+    auth_url = f"{mp['seller_central']}/apps/authorize/consent?{urlencode(params)}"
+
+    return {
+        "url": auth_url,
+        "state": state,
+        "marketplace": marketplace,
+        "store_name": store_name,
+        "message": "Redirect user to this URL",
+    }
+
+
+@oauth_router.get("/callback")
+async def amazon_oauth_callback(
+    state: str,
+    spapi_oauth_code: Optional[str] = None,
+    selling_partner_id: Optional[str] = None,
+    mws_auth_token: Optional[str] = None,
+    error: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """
+    Step 2 of OAuth flow.
+    Amazon redirects here after user authorizes.
+    We exchange the code for a refresh token and save the store.
+    User is then redirected back to the dashboard.
+    """
+    # handle user denial
+    if error:
+        return JSONResponse(
+            status_code=302,
+            headers={"Location": f"{FRONTEND_URL}/settings?error=amazon_denied"},
+        )
+
+    # validate state
+    state_data = _oauth_states.pop(state, None)
+    if not state_data:
+        return JSONResponse(
+            status_code=302,
+            headers={"Location": f"{FRONTEND_URL}/settings?error=invalid_state"},
+        )
+
+    user_id    = state_data["user_id"]
+    marketplace = state_data["marketplace"]
+    store_name = state_data["store_name"]
+    mp         = MARKETPLACES.get(marketplace, MARKETPLACES["IN"])
+
+    refresh_token = None
+
+    # exchange authorization code for LWA refresh token
+    if spapi_oauth_code:
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                r = await client.post(
+                    "https://api.amazon.com/auth/o2/token",
+                    data={
+                        "grant_type": "authorization_code",
+                        "code": spapi_oauth_code,
+                        "client_id": SP_API_CLIENT_ID,
+                        "client_secret": SP_API_CLIENT_SECRET,
+                    },
+                )
+                r.raise_for_status()
+                token_data     = r.json()
+                refresh_token  = token_data.get("refresh_token")
+                access_token   = token_data.get("access_token")
+                expires_in     = token_data.get("expires_in", 3600)
+        except Exception as e:
+            log.error("OAuth token exchange error: %s", e)
+            return JSONResponse(
+                status_code=302,
+                headers={"Location": f"{FRONTEND_URL}/settings?error=token_exchange_failed"},
+            )
+
+    # save store to database
+    try:
+        store = Store(
+            user_id=user_id,
+            marketplace=mp["name"],
+            store_name=store_name,
+            seller_id=selling_partner_id or "",
+            marketplace_id=mp["marketplace_id"],
+            sp_client_id=SP_API_CLIENT_ID,
+            sp_client_secret=SP_API_CLIENT_SECRET,
+            sp_refresh_token=refresh_token or "",
+            sp_access_token=access_token if refresh_token else "",
+            sp_token_expiry=datetime.utcnow() + timedelta(seconds=expires_in - 60) if refresh_token else None,
+            is_connected=True,
+        )
+        db.add(store)
+        db.commit()
+        db.refresh(store)
+
+        # create welcome notification
+        notif = Notification(
+            user_id=user_id,
+            title=f"{store_name} connected!",
+            message=f"Your {mp['name']} store is now connected. Syncing data...",
+            severity="success",
+        )
+        db.add(notif)
+        db.commit()
+
+        # redirect back to frontend with success
+        return JSONResponse(
+            status_code=302,
+            headers={"Location": f"{FRONTEND_URL}/settings?success=store_connected&store_id={store.id}"},
+        )
+    except Exception as e:
+        log.error("Store save error: %s", e)
+        return JSONResponse(
+            status_code=302,
+            headers={"Location": f"{FRONTEND_URL}/settings?error=store_save_failed"},
+        )
+
+
+@oauth_router.get("/ads/connect/url")
+async def get_ads_connect_url(
+    store_id: Optional[str] = None,
+    marketplace: str = "IN",
+    current: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    OAuth URL for Amazon Ads API connection.
+    Separate from SP-API — user clicks "Connect Ads" button.
+    """
+    if not ADS_CLIENT_ID:
+        raise HTTPException(400, "ADS_CLIENT_ID not configured in Render environment")
+
+    state = secrets.token_urlsafe(32)
+    _oauth_states[state] = {
+        "user_id":    current.id,
+        "store_id":   store_id,
+        "marketplace": marketplace.upper(),
+        "type":       "ads",
+        "created_at": datetime.utcnow().isoformat(),
+    }
+
+    callback_url = "https://sellervector-backend.onrender.com/api/amazon/ads/callback"
+
+    params = {
+        "client_id":     ADS_CLIENT_ID,
+        "scope":         "advertising::campaign_management",
+        "response_type": "code",
+        "redirect_uri":  callback_url,
+        "state":         state,
+    }
+
+    auth_url = f"https://www.amazon.com/ap/oa?{urlencode(params)}"
+    return {"url": auth_url, "state": state}
+
+
+@oauth_router.get("/ads/callback")
+async def amazon_ads_callback(
+    state: str,
+    code: Optional[str] = None,
+    error: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """Handle Amazon Ads OAuth callback."""
+    if error:
+        return JSONResponse(
+            status_code=302,
+            headers={"Location": f"{FRONTEND_URL}/settings?error=ads_denied"},
+        )
+
+    state_data = _oauth_states.pop(state, None)
+    if not state_data:
+        return JSONResponse(
+            status_code=302,
+            headers={"Location": f"{FRONTEND_URL}/settings?error=invalid_state"},
+        )
+
+    user_id  = state_data["user_id"]
+    store_id = state_data.get("store_id")
+
+    if not code:
+        return JSONResponse(
+            status_code=302,
+            headers={"Location": f"{FRONTEND_URL}/settings?error=no_code"},
+        )
+
+    try:
+        # exchange code for refresh token
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.post(
+                "https://api.amazon.com/auth/o2/token",
+                data={
+                    "grant_type":    "authorization_code",
+                    "code":          code,
+                    "client_id":     ADS_CLIENT_ID,
+                    "client_secret": ADS_CLIENT_SECRET,
+                    "redirect_uri":  "https://sellervector-backend.onrender.com/api/amazon/ads/callback",
+                },
+            )
+            r.raise_for_status()
+            token_data    = r.json()
+            refresh_token = token_data.get("refresh_token")
+            access_token  = token_data.get("access_token")
+            expires_in    = token_data.get("expires_in", 3600)
+
+        # get profile ID automatically
+        profile_id = ""
+        if access_token:
+            mp = MARKETPLACES.get(state_data.get("marketplace", "IN"), MARKETPLACES["IN"])
+            try:
+                async with httpx.AsyncClient(timeout=15) as client:
+                    r = await client.get(
+                        f"{mp['ads_region']}/v2/profiles",
+                        headers={
+                            "Authorization": f"Bearer {access_token}",
+                            "Amazon-Advertising-API-ClientId": ADS_CLIENT_ID,
+                        },
+                    )
+                    r.raise_for_status()
+                    profiles = r.json()
+                    if profiles:
+                        profile_id = str(profiles[0].get("profileId", ""))
+            except Exception as e:
+                log.warning("Could not fetch Ads profiles: %s", e)
+
+        # save to store if store_id provided
+        if store_id:
+            store = db.query(Store).filter(
+                Store.id == store_id, Store.user_id == user_id
+            ).first()
+            if store:
+                store.ads_client_id     = ADS_CLIENT_ID
+                store.ads_client_secret = ADS_CLIENT_SECRET
+                store.ads_refresh_token = refresh_token or ""
+                store.ads_access_token  = access_token or ""
+                store.ads_token_expiry  = datetime.utcnow() + timedelta(seconds=expires_in-60)
+                store.ads_profile_id    = profile_id
+                db.commit()
+
+        # also save globally for backward compat
+        notif = Notification(
+            user_id=user_id,
+            title="Amazon Ads connected!",
+            message=f"Ads API connected. Profile ID: {profile_id or 'check /ads/profiles'}",
+            severity="success",
+        )
+        db.add(notif)
+        db.commit()
+
+        return JSONResponse(
+            status_code=302,
+            headers={"Location": f"{FRONTEND_URL}/settings?success=ads_connected&profile_id={profile_id}"},
+        )
+    except Exception as e:
+        log.error("Ads OAuth callback error: %s", e)
+        return JSONResponse(
+            status_code=302,
+            headers={"Location": f"{FRONTEND_URL}/settings?error=ads_token_failed"},
+        )
+
+
+@oauth_router.get("/marketplaces")
+def list_marketplaces():
+    """Return all supported marketplaces — shown in Connect Store modal."""
+    return {
+        "marketplaces": [
+            {"code": k, "name": v["name"], "marketplace_id": v["marketplace_id"]}
+            for k, v in MARKETPLACES.items()
+        ]
+    }
+
+
+# Mount oauth router
+api.include_router(oauth_router)
