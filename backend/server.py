@@ -46,6 +46,7 @@ DATABASE_URL          = os.getenv("DATABASE_URL", "sqlite:///./sellervector.db")
 ANTHROPIC_API_KEY     = os.getenv("ANTHROPIC_API_KEY", "")
 ANTHROPIC_MODEL       = "claude-sonnet-4-20250514"
 FRONTEND_ORIGINS = ["*"]
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("sellervector")
 
@@ -56,7 +57,6 @@ engine = create_engine(
     DATABASE_URL,
     connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {},
 )
-# Drop and recreate all tables with new schema
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
@@ -278,6 +278,7 @@ class NotificationSetting(Base):
 
 
 Base.metadata.create_all(bind=engine)
+
 
 # ──────────────────────────────────────────────────────────────
 #  AUTH HELPERS
@@ -1201,7 +1202,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=FRONTEND_ORIGINS,
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
