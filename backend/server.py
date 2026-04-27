@@ -45,8 +45,7 @@ TOKEN_EXPIRY = 60 * 24   # 24 hours
 DATABASE_URL          = os.getenv("DATABASE_URL", "sqlite:///./sellervector.db")
 ANTHROPIC_API_KEY     = os.getenv("ANTHROPIC_API_KEY", "")
 ANTHROPIC_MODEL       = "claude-sonnet-4-20250514"
-FRONTEND_ORIGINS      = os.getenv("FRONTEND_ORIGINS", "*").split(",")
-
+FRONTEND_ORIGINS = ["*"]
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("sellervector")
 
@@ -1202,8 +1201,8 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=FRONTEND_ORIGINS,
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
