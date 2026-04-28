@@ -594,7 +594,7 @@ def marketplaces():
 @amazon_r.get("/connect/url")
 def connect_url(marketplace: str = "IN", store_name: str = "My Store",
                 current: User = Depends(get_current_user)):
-    return {"url": f"https://sellercentral.amazon.in/apps/authorize/consent?application_id=amzn1.sp.solution.xxx",
+    return {"url": f"https://sellercentral.amazon.in/apps/authorize/consent?application_id=amzn1.sp.solution.0a209003-ce0c-41e2-b88c-e464f42b32a0",
             "message": "SP_API_CLIENT_ID not configured yet"}
 
 # Multi-store placeholder
