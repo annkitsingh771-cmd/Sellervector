@@ -594,7 +594,7 @@ def marketplaces():
 @amazon_r.get("/connect/url")
 def connect_url(marketplace: str = "IN", store_name: str = "My Store",
                 current: User = Depends(get_current_user)):
-    return {"url": f"https://sellercentral.amazon.in/apps/authorize/consent?application_id=amzn1.sp.solution.0a209003-ce0c-41e2-b88c-e464f42b32a0",
+    return {"url": f"https://sellercentral.amazon.in/apps/authorize/consent?application_id=amzn1.sp.solution.xxx",
             "message": "SP_API_CLIENT_ID not configured yet"}
 
 # Multi-store placeholder
@@ -619,6 +619,101 @@ api.include_router(rules_r)
 api.include_router(cb_r)
 api.include_router(analytics_r)
 api.include_router(amazon_r)
+
+@multi_r.post("/sync/{store_id}")
+async def sync_store(store_id: str, current: User = Depends(get_current_user),
+                     db: Session = Depends(get_db)):
+    store = db.query(Store).filter(Store.id == store_id,
+                                   Store.user_id == current.id).first()
+    if not store:
+        raise HTTPException(404, "Store not found")
+
+    results = {"store": store.store_name, "status": "synced"}
+
+    # Try SP-API sync if refresh token available
+    sp_token = store.sp_refresh_token or os.getenv("SP_API_REFRESH_TOKEN", "")
+    sp_client_id = store.sp_client_id or os.getenv("SP_API_CLIENT_ID", "")
+    sp_client_secret = store.sp_client_secret or os.getenv("SP_API_CLIENT_SECRET", "")
+
+    if all([sp_token, sp_client_id, sp_client_secret]):
+        try:
+            import httpx
+            # Get access token
+            async with httpx.AsyncClient(timeout=15) as client:
+                r = await client.post(
+                    "https://api.amazon.com/auth/o2/token",
+                    data={
+                        "grant_type": "refresh_token",
+                        "refresh_token": sp_token,
+                        "client_id": sp_client_id,
+                        "client_secret": sp_client_secret,
+                    },
+                )
+                r.raise_for_status()
+                access_token = r.json()["access_token"]
+
+            marketplace_id = "A21TJRUUN4KGV"  # India default
+            sp_base = "https://sellingpartnerapi-fe.amazon.com"
+            headers = {
+                "x-amz-access-token": access_token,
+                "x-amz-marketplace-id": marketplace_id,
+                "Content-Type": "application/json",
+            }
+
+            # Fetch orders
+            from datetime import datetime, timedelta
+            created_after = (datetime.utcnow() - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            async with httpx.AsyncClient(timeout=30) as client:
+                r = await client.get(
+                    f"{sp_base}/orders/v0/orders",
+                    headers=headers,
+                    params={"MarketplaceIds": marketplace_id, "CreatedAfter": created_after},
+                )
+                r.raise_for_status()
+                orders_data = r.json().get("payload", {}).get("Orders", [])
+
+            new_orders = 0
+            for o in orders_data:
+                if not db.query(Order).filter(Order.id == o["AmazonOrderId"]).first():
+                    amount = float(o.get("OrderTotal", {}).get("Amount", 0))
+                    order_date = datetime.strptime(o["PurchaseDate"][:19], "%Y-%m-%dT%H:%M:%S")
+                    db.add(Order(
+                        id=o["AmazonOrderId"],
+                        store_id=store.id,
+                        order_date=order_date,
+                        revenue=amount,
+                        profit=amount * 0.2,
+                        ad_spend=amount * 0.15,
+                        status=o.get("OrderStatus", "shipped"),
+                    ))
+                    new_orders += 1
+            db.commit()
+            results["new_orders"] = new_orders
+            results["total_orders"] = len(orders_data)
+            results["sp_api"] = "success"
+
+        except Exception as e:
+            results["sp_api_error"] = str(e)
+            log.error("SP-API sync error: %s", e)
+    else:
+        results["sp_api"] = "No SP-API credentials configured"
+
+    # Update last sync time
+    from datetime import datetime
+    store.last_sync = datetime.utcnow()
+    db.commit()
+
+    # Send notification
+    db.add(Notification(
+        user_id=current.id,
+        title=f"{store.store_name} synced",
+        message=f"Synced {results.get('total_orders', 0)} orders",
+        severity="success"
+    ))
+    db.commit()
+
+    return results
+
 api.include_router(multi_r)
 
 # APP
